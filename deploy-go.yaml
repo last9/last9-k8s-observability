@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-app
+  labels:
+    app: go-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: go-app
+  template:
+    metadata:
+      labels:
+        app: go-app
+      annotations:
+        # Enable eBPF auto-instrumentation for Go
+        instrumentation.opentelemetry.io/inject-go: "true"
+    spec:
+      # Required for eBPF: Grant SYS_PTRACE and SYS_ADMIN capabilities
+      # This allows the sidecar to instrument the Go binary
+      shareProcessNamespace: true
+      containers:
+      - name: go-app
+        image: your-go-app:latest  # Replace with your Go application image
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        # Optional: Override default service name
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: "my-go-service"
+        # Required: Go binary path inside container
+        # The eBPF agent needs to know which binary to instrument
+        - name: OTEL_GO_AUTO_TARGET_EXE
+          value: "/app/main"  # Adjust to your binary path
+
+---
+# Service for the Go application
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-app
+spec:
+  selector:
+    app: go-app
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
