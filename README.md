@@ -123,7 +123,7 @@ Depending on your installation option, the following components are deployed in 
 
 | Component | Version | Purpose | Data Types |
 |-----------|---------|---------|------------|
-| **OpenTelemetry Operator** | v0.92.1 | Manages auto-instrumentation of applications | Traces |
+| **OpenTelemetry Operator** | v0.102.0 | Manages auto-instrumentation of applications | Traces |
 | **OpenTelemetry Collector** | v0.126.0 | Aggregates and forwards telemetry data | Logs, Traces |
 | **Kube-Prometheus-Stack** | v75.15.1 | Collects cluster and application metrics | Metrics |
 | └─ Prometheus (Agent Mode) | - | Optimized for remote write | Metrics |

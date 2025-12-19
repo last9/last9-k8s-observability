@@ -16,9 +16,11 @@ spec:
       annotations:
         # Enable eBPF auto-instrumentation for Go
         instrumentation.opentelemetry.io/inject-go: "true"
+        # REQUIRED: Path to Go binary (must be annotation, not env var!)
+        # Adjust this to your binary path inside the container
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: "/app/main"
     spec:
-      # Required for eBPF: Grant SYS_PTRACE and SYS_ADMIN capabilities
-      # This allows the sidecar to instrument the Go binary
+      # Required for eBPF: allows sidecar to access the Go process
       shareProcessNamespace: true
       containers:
       - name: go-app
@@ -32,14 +34,10 @@ spec:
           limits:
             memory: "256Mi"
             cpu: "200m"
-        # Optional: Override default service name
         env:
+        # Optional: Override default service name
         - name: OTEL_SERVICE_NAME
           value: "my-go-service"
-        # Required: Go binary path inside container
-        # The eBPF agent needs to know which binary to instrument
-        - name: OTEL_GO_AUTO_TARGET_EXE
-          value: "/app/main"  # Adjust to your binary path
 
 ---
 # Service for the Go application

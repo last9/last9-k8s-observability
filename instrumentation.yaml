@@ -33,6 +33,11 @@ spec:
         - name: OTEL_RESOURCE_ATTRIBUTES
           value: "deployment.environment=local"
   nodejs:
+    # For legacy Node.js versions (10, 12), specify a custom image:
+    # image: ghcr.io/last9/autoinstrumentation-nodejs:node10  # For Node 10.x
+    # image: ghcr.io/last9/autoinstrumentation-nodejs:node12  # For Node 12.x
+    # Default (commented out) uses the latest Node.js version (14+)
+
     env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector-service.last9.svc.cluster.local:4318"
@@ -77,14 +82,52 @@ spec:
     - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
       value: system-metrics
   go:
+    # Go eBPF auto-instrumentation requires:
+    # 1. Linux kernel 4.4+ (5.x recommended)
+    # 2. Go 1.17+ compiled binary
+    # 3. shareProcessNamespace: true in pod spec
+    # 4. OTEL_GO_AUTO_TARGET_EXE set in your deployment (required per-app)
+    #
+    # See: autoinstrumentation/go/README.md for full documentation
+
     env:
+    # === Exporter Configuration ===
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
       value: http://otel-collector-service.last9.svc.cluster.local:4318
     - name: OTEL_EXPORTER_OTLP_PROTOCOL
       value: http/protobuf
+    - name: OTEL_EXPORTER_OTLP_COMPRESSION
+      value: gzip
+    - name: OTEL_EXPORTER_OTLP_TIMEOUT
+      value: "10"
+
+    # === Resource Attributes ===
     - name: OTEL_RESOURCE_ATTRIBUTES
       value: deployment.environment=local
-    - name: OTEL_GO_AUTO_TARGET_EXE
-      value: /path/to/your/binary
-    - name: OTEL_SERVICE_NAME
-      value: go-app
+
+    # === Exporter Selection ===
+    # Disable metrics and logs (traces only)
+    - name: OTEL_METRICS_EXPORTER
+      value: none
+    - name: OTEL_LOGS_EXPORTER
+      value: none
+
+    # === Go eBPF Specific Settings ===
+    # OTEL_GO_AUTO_TARGET_EXE: Set this in your deployment, NOT here
+    # Each Go app has a different binary path (e.g., /app/main, /usr/bin/server)
+    # Example in deployment:
+    #   env:
+    #   - name: OTEL_GO_AUTO_TARGET_EXE
+    #     value: "/app/main"
+
+    # Include SQL statements in spans (set to "true" to enable, false by default for security)
+    # - name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT
+    #   value: "false"
+
+    # === Sampling Configuration ===
+    # Default: parentbased_always_on (samples all traces)
+    # Production recommendation: parentbased_traceidratio with 0.1 (10%)
+    # - name: OTEL_TRACES_SAMPLER
+    #   value: parentbased_traceidratio
+    # - name: OTEL_TRACES_SAMPLER_ARG
+    #   value: "0.1"

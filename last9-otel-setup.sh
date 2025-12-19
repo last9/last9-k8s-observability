@@ -30,7 +30,7 @@ set -e  # Exit on any error
 
 # Configuration defaults
 NAMESPACE="last9"
-OPERATOR_VERSION="0.92.1"
+OPERATOR_VERSION="0.102.0"
 COLLECTOR_VERSION="0.126.0"
 MONITORING_VERSION="75.15.1"
 
@@ -1423,9 +1423,15 @@ install_operator() {
         "--version" "$OPERATOR_VERSION"
         "-n" "$NAMESPACE"
         "--create-namespace"
+        "--skip-schema-validation"
         "--set" "manager.collectorImage.repository=ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-k8s"
         "--set" "admissionWebhooks.certManager.enabled=false"
         "--set" "admissionWebhooks.autoGenerateCert.enabled=true"
+        # Go eBPF auto-instrumentation is disabled by default (beta feature)
+        # To enable, run: helm upgrade opentelemetry-operator open-telemetry/opentelemetry-operator -n last9 --reuse-values \
+        #   --set manager.autoInstrumentation.go.enabled=true \
+        #   --set manager.autoInstrumentationImage.go.repository=ghcr.io/open-telemetry/opentelemetry-go-instrumentation/autoinstrumentation-go \
+        #   --set manager.autoInstrumentationImage.go.tag=v0.23.0
     )
 
     # Add tolerations and nodeSelector if provided

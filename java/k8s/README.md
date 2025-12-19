@@ -48,7 +48,7 @@ The OpenTelemetry Collector acts as a central hub for receiving, processing, and
 
 ### Configuration
 
-#### Option1: You want to integrate k8s logs & traces
+#### Option 1: You want to integrate Kubernetes logs & traces
 
 1. [Use this helm chart mentioned here](https://app.last9.io/integrations?category=all&search_term=logs&integration=Last9+Otel+Collector+Setup+for+Kubernetes)
 2. Apply the helm chart
@@ -58,11 +58,11 @@ helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm
 helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector --version 0.125.0 -n last9 --create-namespace -f last9-otel-collector-values.yaml 
 ```
 
-#### Option2: You want to only integrate traces and you have an otel collector running
+#### Option 2: You want to only integrate traces and you have an OpenTelemetry collector running
 
 You can skip this and move to the next step.
 
-#### Option3: You want to only integrate traces 
+#### Option 3: You want to only integrate traces 
 
 1. Copy [this](https://github.com/last9/opentelemetry-examples/blob/otel-operator/otel-collector/otel-operator/java/k8s/OpenTelemetryCollector.yaml) and save as `OpenTelemetryCollector.yaml`
 2. Replace the placeholder token with your actual Last9 auth
@@ -143,7 +143,7 @@ Verify that all components are running correctly:
 
 ```sh
 # Check operator status
-kubectl get pods -n de <your-namespace> | grep opentelemetry-operator
+kubectl get pods -n <your-namespace> | grep opentelemetry-operator
 
 # Check collector status
 kubectl get pods -n <your-namespace> | grep otel-collector
