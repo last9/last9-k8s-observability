@@ -1,0 +1,176 @@
+# Optional metrics scraping configuration for OpenTelemetry Collector
+# This file adds automatic metrics scraping capabilities via Prometheus receiver
+# Use this file with: helm upgrade ... --values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml
+
+# Enable ClusterRole for Kubernetes service discovery
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources:
+        - nodes
+        - nodes/metrics
+        - services
+        - endpoints
+        - pods
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources:
+        - configmaps
+      verbs: ["get"]
+    - nonResourceURLs:
+        - /metrics
+      verbs: ["get"]
+
+# Base collector configuration for metrics scraping
+config:
+  exporters:
+    # Prometheus Remote Write exporter for Last9 metrics endpoint
+    prometheusremotewrite/last9:
+      endpoint: "{{LAST9_METRICS_ENDPOINT}}"
+      # Use basic auth for Prometheus remote write endpoint
+      auth:
+        authenticator: basicauth/last9_metrics
+      # Optional: Add external labels to all metrics sent to Last9
+      # Uncomment and customize the labels below as needed
+      # external_labels:
+      #   cluster: "minikube"
+      #   deployment_environment: "local"
+      # Optional: Resource to telemetry conversion (converts K8s resource attributes to metric labels)
+      # Uncomment if you want K8s resource attributes (from k8sattributes processor) as metric labels
+      # resource_to_telemetry_conversion:
+      #   enabled: true
+      # Retry configuration
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 300s
+
+  extensions:
+    # Basic auth extension for Prometheus remote write
+    basicauth/last9_metrics:
+      client_auth:
+        username: "{{LAST9_METRICS_USERNAME}}"
+        password: "{{LAST9_METRICS_PASSWORD}}"
+
+  receivers:
+    # Prometheus receiver with Kubernetes service discovery
+    prometheus:
+      config:
+        scrape_configs:
+          # Collector's own metrics
+          - job_name: 'opentelemetry-collector'
+            scrape_interval: 30s
+            static_configs:
+              - targets: ['${env:MY_POD_IP}:8888']
+
+          # Application metrics via pod annotations (standard Prometheus annotations)
+          - job_name: 'kubernetes-pods'
+            scrape_interval: 30s
+            scrape_timeout: 10s
+            honor_labels: true
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              # Only scrape pods with prometheus.io/scrape=true annotation
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+
+              # Read custom scrape port from annotation
+              - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^:]+);(\d+)
+                replacement: $1:$2
+                target_label: __address__
+
+              # Read custom metrics path from annotation (default /metrics)
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+
+              # Add Kubernetes metadata as labels
+              - source_labels: [__meta_kubernetes_pod_name]
+                action: replace
+                target_label: pod
+
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+
+              - source_labels: [__meta_kubernetes_pod_node_name]
+                action: replace
+                target_label: node
+
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: replace
+                target_label: app
+
+          # Application metrics via service annotations (standard Prometheus annotations)
+          - job_name: 'kubernetes-services'
+            scrape_interval: 30s
+            scrape_timeout: 10s
+            honor_labels: true
+            kubernetes_sd_configs:
+              - role: service
+            relabel_configs:
+              # Only scrape services with prometheus.io/scrape=true annotation
+              - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+
+              # Read custom scrape port from annotation
+              - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_namespace, __meta_kubernetes_service_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^;]+);([^;]+);(\d+)
+                replacement: $1.$2.svc.cluster.local:$3
+                target_label: __address__
+
+              # Read custom metrics path from annotation
+              - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+
+              # Add service metadata as labels
+              - source_labels: [__meta_kubernetes_service_name]
+                action: replace
+                target_label: service
+
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+
+  service:
+    extensions:
+      - health_check
+      - basicauth/last9_metrics
+    pipelines:
+      metrics:
+        receivers:
+          - otlp
+          - prometheus
+        processors:
+          - k8sattributes
+          - batch
+        exporters:
+          - prometheusremotewrite/last9
+
+# Increase resource limits for metrics scraping workload
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+# Optional: Enable metrics port for monitoring
+# ports:
+#   metrics:
+#     enabled: true
+#     containerPort: 8888
+#     servicePort: 8888
+#     protocol: TCP

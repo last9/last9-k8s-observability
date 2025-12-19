@@ -198,3 +198,105 @@ The script automatically sets up instrumentation for:
 - 🟢 **Node.js** - Automatic OTLP export
 - 🔵 **Go** - Manual instrumentation supported
 - 💎 **Ruby** - Coming soon
+
+## Application Metrics Scraping (Optional)
+
+The OpenTelemetry Collector can automatically discover and scrape application metrics using Kubernetes service discovery with Prometheus-compatible scraping.
+
+**Note:** This is an optional feature. Use `last9-otel-collector-metrics-values.yaml` to enable metrics scraping.
+
+### Enable Metrics Scraping
+
+To enable application metrics scraping, deploy with the additional metrics configuration file:
+
+```bash
+# Deploy with metrics scraping enabled
+helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+  --namespace last9 \
+  --values last9-otel-collector-values.yaml \
+  --values last9-otel-collector-metrics-values.yaml
+```
+
+**Configure Last9 Metrics Endpoint:**
+
+Before deploying, update these placeholders in `last9-otel-collector-metrics-values.yaml`:
+- `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 Prometheus remote write URL
+- `{{LAST9_METRICS_USERNAME}}` - Your Last9 metrics username
+- `{{LAST9_METRICS_PASSWORD}}` - Your Last9 metrics password
+
+### Quick Start
+
+Add these annotations to your pod template or service to enable automatic metrics scraping:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"  # Optional, defaults to /metrics
+```
+
+That's it! Your application metrics will be automatically:
+- **Discovered** - No manual configuration needed
+- **Scraped** - Every 30 seconds by default
+- **Enriched** - With pod, namespace, node labels
+- **Exported** - To Last9 via Prometheus remote write
+
+### How It Works
+
+1. **Automatic Discovery** - OTel Collector watches Kubernetes API for all pods/services
+2. **Annotation-Based Filtering** - Only scrapes resources with `prometheus.io/scrape: "true"`
+3. **Metadata Enrichment** - Adds Kubernetes labels automatically (pod, namespace, node, app)
+4. **Direct Export** - Sends metrics to Last9 Prometheus endpoint
+
+### Supported Annotations
+
+| Annotation | Required | Default | Description |
+|------------|----------|---------|-------------|
+| `prometheus.io/scrape` | Yes | - | Set to "true" to enable scraping |
+| `prometheus.io/port` | Yes | - | Port number exposing /metrics |
+| `prometheus.io/path` | No | /metrics | HTTP path for metrics endpoint |
+
+### Scaling
+
+This setup scales automatically:
+- **1 service** → Automatically scraped
+- **1000 services** → Automatically scraped
+- **No configuration changes needed** when adding new services
+
+### Configuration Files
+
+**Base Configuration:** `last9-otel-collector-values.yaml`
+- Traces and logs collection
+- Basic OTLP receiver
+- No metrics scraping
+
+**Optional Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
+- **Prometheus receiver** with kubernetes_sd_configs for auto-discovery
+- **prometheusremotewrite exporter** for sending to Last9
+- **RBAC** for Kubernetes API access
+- **Increased resource limits** for collector pods
+- **BasicAuth extension** for Last9 metrics endpoint
+
+To use both: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
+
+### Verification
+
+Check if metrics are being scraped:
+
+```bash
+# Check collector logs for scraping
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep kubernetes-pods
+
+# Port-forward to collector metrics endpoint
+kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
+
+# Check scrape status
+curl http://localhost:8888/metrics | grep scrape_samples_scraped
+```
