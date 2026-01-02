@@ -176,6 +176,68 @@ config:
       limit_percentage: 85
       # By default spike_limit_mib is set to 15% of ".Values.resources.limits.memory"
       spike_limit_percentage: 15
+
+    # ============================================================================
+    # TOPOLOGY PROCESSOR
+    # Extracts relationship attributes from K8s objects for dependency graph building
+    # ============================================================================
+    transform/topology:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Set service name to identify topology data
+            - set(resource.attributes["service.name"], "k8s-topology")
+
+            # Extract resource kind and name
+            - set(attributes["k8s.resource.kind"], body["object"]["kind"])
+            - set(attributes["k8s.resource.name"], body["object"]["metadata"]["name"])
+            - set(attributes["k8s.namespace.name"], body["object"]["metadata"]["namespace"])
+            - set(attributes["k8s.resource.uid"], body["object"]["metadata"]["uid"])
+
+            # Extract ownerReferences (first owner - most K8s objects have single owner)
+            - set(attributes["k8s.owner.kind"], body["object"]["metadata"]["ownerReferences"][0]["kind"]) where body["object"]["metadata"]["ownerReferences"] != nil
+            - set(attributes["k8s.owner.name"], body["object"]["metadata"]["ownerReferences"][0]["name"]) where body["object"]["metadata"]["ownerReferences"] != nil
+            - set(attributes["k8s.owner.uid"], body["object"]["metadata"]["ownerReferences"][0]["uid"]) where body["object"]["metadata"]["ownerReferences"] != nil
+
+            # Extract Pod-specific attributes
+            - set(attributes["k8s.pod.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "Pod"
+            - set(attributes["k8s.pod.phase"], body["object"]["status"]["phase"]) where body["object"]["kind"] == "Pod"
+            - set(attributes["k8s.pod.node"], body["object"]["spec"]["nodeName"]) where body["object"]["kind"] == "Pod"
+            - set(attributes["k8s.pod.serviceaccount"], body["object"]["spec"]["serviceAccountName"]) where body["object"]["kind"] == "Pod"
+
+            # Extract Deployment-specific attributes
+            - set(attributes["k8s.deployment.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "Deployment"
+            - set(attributes["k8s.deployment.replicas"], body["object"]["spec"]["replicas"]) where body["object"]["kind"] == "Deployment"
+            - set(attributes["k8s.deployment.available_replicas"], body["object"]["status"]["availableReplicas"]) where body["object"]["kind"] == "Deployment"
+
+            # Extract ReplicaSet-specific attributes
+            - set(attributes["k8s.replicaset.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "ReplicaSet"
+            - set(attributes["k8s.replicaset.replicas"], body["object"]["spec"]["replicas"]) where body["object"]["kind"] == "ReplicaSet"
+
+            # Extract StatefulSet-specific attributes
+            - set(attributes["k8s.statefulset.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "StatefulSet"
+            - set(attributes["k8s.statefulset.replicas"], body["object"]["spec"]["replicas"]) where body["object"]["kind"] == "StatefulSet"
+
+            # Extract DaemonSet-specific attributes
+            - set(attributes["k8s.daemonset.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "DaemonSet"
+            - set(attributes["k8s.daemonset.desired"], body["object"]["status"]["desiredNumberScheduled"]) where body["object"]["kind"] == "DaemonSet"
+            - set(attributes["k8s.daemonset.ready"], body["object"]["status"]["numberReady"]) where body["object"]["kind"] == "DaemonSet"
+
+            # Extract Service-specific attributes (selectors stored as JSON for querying)
+            - set(attributes["k8s.service.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "Service"
+            - set(attributes["k8s.service.type"], body["object"]["spec"]["type"]) where body["object"]["kind"] == "Service"
+            - set(attributes["k8s.service.cluster_ip"], body["object"]["spec"]["clusterIP"]) where body["object"]["kind"] == "Service"
+
+            # Extract Ingress-specific attributes
+            - set(attributes["k8s.ingress.name"], body["object"]["metadata"]["name"]) where body["object"]["kind"] == "Ingress"
+
+            # Extract labels as attributes for selector matching
+            - merge_maps(attributes, body["object"]["metadata"]["labels"], "upsert") where body["object"]["metadata"]["labels"] != nil
+
+            # Set timestamp from resource metadata
+            - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ"))) where time_unix_nano == 0
+
   receivers:
     otlp:
       protocols:
@@ -192,6 +254,59 @@ config:
             static_configs:
               - targets:
                   - ${env:MY_POD_IP}:8888
+    # K8s resource topology receiver - collects ownerReferences and selectors for dependency graphs
+    # Pulls full object metadata periodically to enable resource relationship visualization
+    k8sobjects/topology:
+      auth_type: serviceAccount
+      objects:
+        # Pods with ownerReferences to link to Deployments/ReplicaSets/StatefulSets/DaemonSets
+        - name: pods
+          mode: pull
+          interval: 60s
+          # Exclude DELETED to avoid stale topology data
+          exclude_watch_type:
+            - "DELETED"
+        # ReplicaSets with ownerReferences to Deployments
+        - name: replicasets
+          mode: pull
+          interval: 60s
+          group: apps
+        # Deployments as top-level workload controllers
+        - name: deployments
+          mode: pull
+          interval: 60s
+          group: apps
+        # StatefulSets as workload controllers
+        - name: statefulsets
+          mode: pull
+          interval: 60s
+          group: apps
+        # DaemonSets as workload controllers
+        - name: daemonsets
+          mode: pull
+          interval: 60s
+          group: apps
+        # Services with selectors to link to Pods
+        - name: services
+          mode: pull
+          interval: 60s
+        # Ingresses with backend references to Services
+        - name: ingresses
+          mode: pull
+          interval: 120s
+          group: networking.k8s.io
+        # ConfigMaps referenced by Pods
+        - name: configmaps
+          mode: pull
+          interval: 120s
+        # Secrets referenced by Pods (metadata only, not data)
+        - name: secrets
+          mode: pull
+          interval: 120s
+        # PersistentVolumeClaims mounted by Pods
+        - name: persistentvolumeclaims
+          mode: pull
+          interval: 120s
   service:
     telemetry:
       metrics:
@@ -214,6 +329,17 @@ config:
           - batch
         exporters:
           - otlp/last9
+      # K8s resource topology pipeline - collects resource relationships for dependency graphs
+      # Data is queryable via service_name="k8s-topology" in Last9 logs
+      logs/topology:
+        receivers:
+          - k8sobjects/topology
+        processors:
+          - memory_limiter/logs
+          - transform/topology
+          - batch
+        exporters:
+          - otlp/last9
       metrics:
         receivers:
           - otlp
@@ -226,7 +352,7 @@ config:
         receivers:
           - otlp
         processors:
-          - batch          
+          - batch
         exporters:
           - otlp/last9
  
@@ -276,7 +402,7 @@ clusterRole:
   # Specifies whether a clusterRole should be created
   # Some presets also trigger the creation of a cluster role and cluster role binding.
   # If using one of those presets, this field is no-op.
-  create: false
+  create: true
   # Annotations to add to the clusterRole
   # Can be used in combination with presets that create a cluster role.
   annotations: {}
@@ -286,16 +412,53 @@ clusterRole:
   name: ""
   # A set of rules as documented here : https://kubernetes.io/docs/reference/access-authn-authz/rbac/
   # Can be used in combination with presets that create a cluster role to add additional rules.
-  rules: []
-  # - apiGroups:
-  #   - ''
-  #   resources:
-  #   - 'pods'
-  #   - 'nodes'
-  #   verbs:
-  #   - 'get'
-  #   - 'list'
-  #   - 'watch'
+  # These rules enable k8sobjects/topology receiver to collect resource relationships
+  rules:
+    # Core API resources for topology
+    - apiGroups:
+        - ''
+      resources:
+        - pods
+        - services
+        - configmaps
+        - secrets
+        - persistentvolumeclaims
+        - namespaces
+      verbs:
+        - get
+        - list
+        - watch
+    # Apps API group for workload controllers
+    - apiGroups:
+        - apps
+      resources:
+        - deployments
+        - replicasets
+        - statefulsets
+        - daemonsets
+      verbs:
+        - get
+        - list
+        - watch
+    # Networking API group for ingresses
+    - apiGroups:
+        - networking.k8s.io
+      resources:
+        - ingresses
+      verbs:
+        - get
+        - list
+        - watch
+    # Batch API group for jobs (optional, for completeness)
+    - apiGroups:
+        - batch
+      resources:
+        - jobs
+        - cronjobs
+      verbs:
+        - get
+        - list
+        - watch
 
   clusterRoleBinding:
     # Annotations to add to the clusterRoleBinding
