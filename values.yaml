@@ -1,0 +1,542 @@
+# =============================================================================
+# Last9 OpenTelemetry Collector - Node Agent (DaemonSet)
+# =============================================================================
+# Collects node-local telemetry signals:
+# - Traces (OTLP receiver from pods on this node)
+# - Logs (filelog receiver + OTLP)
+# - Metrics (Prometheus receiver + OTLP)
+#
+# For cluster-wide data (events, topology), use values-cluster.yaml
+#
+# Architecture:
+#   DaemonSet (this file)  → node-local: logs, traces, metrics
+#   Deployment (cluster)   → cluster-wide: events, topology
+#
+# Version: 2.0.0
+# =============================================================================
+
+nameOverride: "last9-otel-collector"
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# Deployment Mode: Unified DaemonSet
+# -----------------------------------------------------------------------------
+# DaemonSet ensures node-local collection for logs and optimal trace routing
+mode: "daemonset"
+
+namespaceOverride: "last9"
+
+# -----------------------------------------------------------------------------
+# Resource Configuration (per SPEC.md: Standard 512MB/250m)
+# -----------------------------------------------------------------------------
+resources:
+  limits:
+    cpu: 250m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+useGOMEMLIMIT: true
+
+# -----------------------------------------------------------------------------
+# Presets - Node-local collection capabilities
+# -----------------------------------------------------------------------------
+presets:
+  # Container logs from /var/log/pods
+  logsCollection:
+    enabled: true
+    includeCollectorLogs: false
+    storeCheckpoints: false
+    maxRecombineLogSize: 102400
+
+  # Kubernetes attributes for all signals
+  kubernetesAttributes:
+    enabled: true
+    extractAllPodLabels: true
+    extractAllPodAnnotations: true
+
+  # Kubernetes events - DISABLED (collected by Cluster Agent)
+  kubernetesEvents:
+    enabled: false
+
+  # Host metrics disabled per SPEC (cAdvisor only)
+  hostMetrics:
+    enabled: false
+
+  # Kubelet metrics disabled (use kube-prometheus-stack)
+  kubeletMetrics:
+    enabled: false
+
+  # Cluster metrics disabled (use kube-prometheus-stack)
+  clusterMetrics:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# ClusterRole - RBAC for node-local collection
+# -----------------------------------------------------------------------------
+clusterRole:
+  create: true
+  rules:
+    # Core API resources for k8sattributes and service discovery
+    - apiGroups: [""]
+      resources:
+        - nodes
+        - nodes/metrics
+        - services
+        - endpoints
+        - pods
+        - namespaces
+      verbs: ["get", "list", "watch"]
+    # Apps API group for k8sattributes processor
+    - apiGroups: ["apps"]
+      resources:
+        - deployments
+        - replicasets
+        - statefulsets
+        - daemonsets
+      verbs: ["get", "list", "watch"]
+    # Non-resource URLs for metrics scraping
+    - nonResourceURLs: ["/metrics"]
+      verbs: ["get"]
+
+# -----------------------------------------------------------------------------
+# Collector Configuration
+# -----------------------------------------------------------------------------
+config:
+  # ===========================================================================
+  # EXTENSIONS
+  # ===========================================================================
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+
+    # Basic auth for Prometheus remote write (optional)
+    basicauth/metrics:
+      client_auth:
+        username: "${env:LAST9_METRICS_USERNAME}"
+        password: "${env:LAST9_METRICS_PASSWORD}"
+
+  # ===========================================================================
+  # RECEIVERS
+  # ===========================================================================
+  receivers:
+    # OTLP receiver for application traces, logs, and metrics
+    otlp:
+      protocols:
+        grpc:
+          endpoint: ${env:MY_POD_IP}:4317
+        http:
+          endpoint: ${env:MY_POD_IP}:4318
+
+    # Prometheus receiver for application and collector metrics
+    prometheus:
+      config:
+        scrape_configs:
+          # Collector's own metrics
+          - job_name: 'otel-collector'
+            scrape_interval: 30s
+            static_configs:
+              - targets: ['${env:MY_POD_IP}:8888']
+
+          # Application metrics via pod annotations
+          - job_name: 'kubernetes-pods'
+            scrape_interval: 30s
+            scrape_timeout: 10s
+            honor_labels: true
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              # Only scrape pods with prometheus.io/scrape=true
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+                action: keep
+                regex: true
+              # Read custom scrape port from annotation
+              - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^:]+);(\d+)
+                replacement: $1:$2
+                target_label: __address__
+              # Read custom metrics path from annotation
+              - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+                action: replace
+                target_label: __metrics_path__
+                regex: (.+)
+              # Add Kubernetes metadata as labels
+              - source_labels: [__meta_kubernetes_pod_name]
+                action: replace
+                target_label: pod
+              - source_labels: [__meta_kubernetes_namespace]
+                action: replace
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_node_name]
+                action: replace
+                target_label: node
+              # Preserve app label for service correlation
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: replace
+                target_label: app
+              - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+                action: replace
+                target_label: app_kubernetes_io_name
+            # Metric filtering per SPEC (aggressive defaults)
+            metric_relabel_configs:
+              - source_labels: [__name__]
+                regex: 'up|kube_.*|container_.*|node_.*|go_.*|process_.*'
+                action: keep
+
+  # ===========================================================================
+  # PROCESSORS
+  # ===========================================================================
+  processors:
+    # -------------------------------------------------------------------------
+    # Memory Management
+    # -------------------------------------------------------------------------
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 85
+      spike_limit_percentage: 15
+
+    # -------------------------------------------------------------------------
+    # Batching
+    # -------------------------------------------------------------------------
+    batch:
+      send_batch_size: 15000
+      send_batch_max_size: 15000
+      timeout: 10s
+
+    # -------------------------------------------------------------------------
+    # SERVICE NAME INFERENCE
+    # -------------------------------------------------------------------------
+    # Priority order:
+    # 1. Explicit annotation: last9.io/service-name
+    # 2. OTel env var: OTEL_SERVICE_NAME (already set by SDK)
+    # 3. Helm release: helm.sh/release-name label
+    # 4. Deployment/StatefulSet/DaemonSet name
+    # 5. Container name (fallback)
+    # -------------------------------------------------------------------------
+    transform/service_name:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # Priority 1: Check for explicit last9.io/service-name annotation
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.last9.io/service-name"] != nil
+
+            # Priority 2: OTEL_SERVICE_NAME is handled by SDK (already set)
+
+            # Priority 3: Helm release name
+            - set(attributes["service.name"], attributes["k8s.pod.labels.helm.sh/release-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.helm.sh/release-name"] != nil
+
+            # Priority 4a: Deployment name (most common)
+            - set(attributes["service.name"], attributes["k8s.deployment.name"])
+              where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+
+            # Priority 4b: StatefulSet name
+            - set(attributes["service.name"], attributes["k8s.statefulset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
+
+            # Priority 4c: DaemonSet name
+            - set(attributes["service.name"], attributes["k8s.daemonset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
+
+            # Priority 4d: ReplicaSet name (strip hash suffix for RS owned by Deployment)
+            - set(attributes["service.name"], attributes["k8s.replicaset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.replicaset.name"] != nil
+
+            # Priority 5: app.kubernetes.io/name label
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app.kubernetes.io/name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/name"] != nil
+
+            # Priority 6: app label
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app"] != nil
+
+            # Priority 7: Container name (final fallback)
+            - set(attributes["service.name"], attributes["k8s.container.name"])
+              where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
+
+      trace_statements:
+        - context: resource
+          statements:
+            # Same priority chain for traces
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.last9.io/service-name"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.labels.helm.sh/release-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.helm.sh/release-name"] != nil
+            - set(attributes["service.name"], attributes["k8s.deployment.name"])
+              where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.statefulset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.daemonset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.replicaset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.replicaset.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app.kubernetes.io/name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/name"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app"] != nil
+            - set(attributes["service.name"], attributes["k8s.container.name"])
+              where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
+
+    # -------------------------------------------------------------------------
+    # TRACE-LOG CORRELATION
+    # -------------------------------------------------------------------------
+    # Hybrid approach per SPEC:
+    # 1. SDK injection: OTel SDK adds trace_id/span_id to logs automatically
+    # 2. Fallback extraction: Parse trace context from log body for legacy apps
+    # -------------------------------------------------------------------------
+    transform/trace_correlation:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Fallback 1: Extract trace_id from JSON log body
+            # Supports common patterns: trace_id, traceId, traceID, dd.trace_id
+            - set(trace_id.string, body["trace_id"])
+              where trace_id.string == "" and body["trace_id"] != nil
+            - set(trace_id.string, body["traceId"])
+              where trace_id.string == "" and body["traceId"] != nil
+            - set(trace_id.string, body["traceID"])
+              where trace_id.string == "" and body["traceID"] != nil
+            - set(trace_id.string, body["dd.trace_id"])
+              where trace_id.string == "" and body["dd.trace_id"] != nil
+
+            # Fallback 2: Extract span_id from JSON log body
+            - set(span_id.string, body["span_id"])
+              where span_id.string == "" and body["span_id"] != nil
+            - set(span_id.string, body["spanId"])
+              where span_id.string == "" and body["spanId"] != nil
+            - set(span_id.string, body["spanID"])
+              where span_id.string == "" and body["spanID"] != nil
+            - set(span_id.string, body["dd.span_id"])
+              where span_id.string == "" and body["dd.span_id"] != nil
+
+            # Fallback 3: Extract from nested context object
+            - set(trace_id.string, body["context"]["trace_id"])
+              where trace_id.string == "" and body["context"]["trace_id"] != nil
+            - set(span_id.string, body["context"]["span_id"])
+              where span_id.string == "" and body["context"]["span_id"] != nil
+
+    # -------------------------------------------------------------------------
+    # TRACE ENRICHMENT (for Last9 service map)
+    # -------------------------------------------------------------------------
+    # Last9 trace-to-metrics expects: Environment, Segment, cluster.name
+    # -------------------------------------------------------------------------
+    transform/traces:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            # Set Environment (Last9 expected attribute)
+            - set(attributes["Environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+              where attributes["Environment"] == nil
+
+            # Set cluster.name
+            - set(attributes["cluster.name"], "${env:CLUSTER_NAME}")
+              where attributes["cluster.name"] == nil
+
+            # Also set deployment.environment for OTel compatibility
+            - set(attributes["deployment.environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+              where attributes["deployment.environment"] == nil
+
+    # -------------------------------------------------------------------------
+    # LOG ENRICHMENT
+    # -------------------------------------------------------------------------
+    transform/logs:
+      error_mode: ignore
+      log_statements:
+        - context: resource
+          statements:
+            # Set cluster name (from env var or default)
+            - set(attributes["cluster.name"], "${env:CLUSTER_NAME}")
+              where attributes["cluster.name"] == nil
+
+            # Set deployment environment
+            - set(attributes["deployment.environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+              where attributes["deployment.environment"] == nil
+
+            # Set Environment (Last9 expected attribute)
+            - set(attributes["Environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+              where attributes["Environment"] == nil
+
+  # ===========================================================================
+  # EXPORTERS
+  # ===========================================================================
+  exporters:
+    # Debug exporter for troubleshooting
+    debug:
+      verbosity: basic
+      sampling_initial: 5
+      sampling_thereafter: 200
+
+    # OTLP exporter for traces, logs, and events to Last9
+    otlp/last9:
+      endpoint: "${env:LAST9_OTLP_ENDPOINT}"
+      headers:
+        "Authorization": "${env:LAST9_AUTH_TOKEN}"
+
+    # Prometheus Remote Write for metrics (optional)
+    prometheusremotewrite/last9:
+      endpoint: "${env:LAST9_METRICS_ENDPOINT}"
+      auth:
+        authenticator: basicauth/metrics
+      resource_to_telemetry_conversion:
+        enabled: true
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 300s
+
+  # ===========================================================================
+  # SERVICE CONFIGURATION
+  # ===========================================================================
+  service:
+    telemetry:
+      metrics:
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: ${env:MY_POD_IP}
+                  port: 8888
+
+    extensions:
+      - health_check
+      - basicauth/metrics
+
+    pipelines:
+      # -----------------------------------------------------------------------
+      # TRACES PIPELINE
+      # -----------------------------------------------------------------------
+      traces:
+        receivers:
+          - otlp
+        processors:
+          - memory_limiter
+          - k8sattributes
+          - transform/service_name
+          - transform/traces
+          - batch
+        exporters:
+          - otlp/last9
+
+      # -----------------------------------------------------------------------
+      # LOGS PIPELINE (Application + Container logs)
+      # -----------------------------------------------------------------------
+      logs:
+        receivers:
+          - otlp
+          - filelog
+        processors:
+          - memory_limiter
+          - k8sattributes
+          - transform/service_name
+          - transform/trace_correlation
+          - transform/logs
+          - batch
+        exporters:
+          - otlp/last9
+
+      # -----------------------------------------------------------------------
+      # METRICS PIPELINE
+      # -----------------------------------------------------------------------
+      metrics:
+        receivers:
+          - otlp
+          - prometheus
+        processors:
+          - memory_limiter
+          - k8sattributes
+          - batch
+        exporters:
+          - prometheusremotewrite/last9
+
+# -----------------------------------------------------------------------------
+# Image Configuration
+# -----------------------------------------------------------------------------
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  pullPolicy: IfNotPresent
+  tag: "0.126.0"
+
+# -----------------------------------------------------------------------------
+# Service Configuration
+# -----------------------------------------------------------------------------
+service:
+  enabled: true
+  type: ClusterIP
+
+# -----------------------------------------------------------------------------
+# Ports Configuration
+# -----------------------------------------------------------------------------
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    hostPort: 4317
+    protocol: TCP
+    appProtocol: grpc
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    hostPort: 4318
+    protocol: TCP
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+  # Disabled unused ports
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Extra Environment Variables
+# -----------------------------------------------------------------------------
+extraEnvs:
+  - name: CLUSTER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.labels['cluster-name']
+  - name: DEPLOYMENT_ENVIRONMENT
+    value: "production"
+  # Last9 credentials - override via helm install --set or external secret
+  - name: LAST9_OTLP_ENDPOINT
+    value: ""
+  - name: LAST9_AUTH_TOKEN
+    value: ""
+  - name: LAST9_METRICS_ENDPOINT
+    value: ""
+  - name: LAST9_METRICS_USERNAME
+    value: ""
+  - name: LAST9_METRICS_PASSWORD
+    value: ""
+
+# -----------------------------------------------------------------------------
+# Pod Configuration
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------------
+# Service Account
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

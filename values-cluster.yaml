@@ -1,0 +1,601 @@
+# =============================================================================
+# Last9 OpenTelemetry Collector - Cluster Agent (Deployment)
+# =============================================================================
+# Collects cluster-wide telemetry signals (single replica to avoid duplication):
+# - Events (k8sobjects receiver in watch mode)
+# - Topology (k8sobjects receiver in pull mode)
+# - Service Catalog (k8sobjects receiver, workload metadata)
+#
+# Architecture:
+#   DaemonSet (values.yaml)  → node-local: logs, traces, metrics
+#   Deployment (this file)   → cluster-wide: events, topology, service catalog
+#
+# Install alongside the DaemonSet:
+#   helm install last9-cluster opentelemetry/opentelemetry-collector \
+#     -f values-cluster.yaml -n last9
+#
+# Version: 2.0.0
+# =============================================================================
+
+nameOverride: "last9-cluster-agent"
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# Deployment Mode: Single replica for cluster-wide data
+# -----------------------------------------------------------------------------
+mode: "deployment"
+replicaCount: 1
+
+namespaceOverride: "last9"
+
+# -----------------------------------------------------------------------------
+# Resource Configuration
+# -----------------------------------------------------------------------------
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+useGOMEMLIMIT: true
+
+# -----------------------------------------------------------------------------
+# Presets - Cluster-wide collection
+# -----------------------------------------------------------------------------
+presets:
+  # Logs collection disabled (handled by DaemonSet)
+  logsCollection:
+    enabled: false
+
+  # Kubernetes attributes for enrichment
+  kubernetesAttributes:
+    enabled: true
+    extractAllPodLabels: true
+    extractAllPodAnnotations: true
+
+  # Kubernetes events enabled
+  kubernetesEvents:
+    enabled: true
+
+  # Host metrics disabled
+  hostMetrics:
+    enabled: false
+
+  # Kubelet metrics disabled
+  kubeletMetrics:
+    enabled: false
+
+  # Cluster metrics disabled
+  clusterMetrics:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# ClusterRole - RBAC for cluster-wide collection
+# -----------------------------------------------------------------------------
+clusterRole:
+  create: true
+  rules:
+    # Core API resources for events and topology
+    - apiGroups: [""]
+      resources:
+        - pods
+        - services
+        - configmaps
+        - secrets
+        - persistentvolumeclaims
+        - namespaces
+        - events
+        - nodes
+      verbs: ["get", "list", "watch"]
+    # Apps API group for workload controllers
+    - apiGroups: ["apps"]
+      resources:
+        - deployments
+        - replicasets
+        - statefulsets
+        - daemonsets
+      verbs: ["get", "list", "watch"]
+    # Networking API group for ingresses
+    - apiGroups: ["networking.k8s.io"]
+      resources:
+        - ingresses
+      verbs: ["get", "list", "watch"]
+    # Batch API group for jobs
+    - apiGroups: ["batch"]
+      resources:
+        - jobs
+        - cronjobs
+      verbs: ["get", "list", "watch"]
+
+# -----------------------------------------------------------------------------
+# Collector Configuration
+# -----------------------------------------------------------------------------
+config:
+  # ===========================================================================
+  # EXTENSIONS
+  # ===========================================================================
+  extensions:
+    health_check:
+      endpoint: ${env:MY_POD_IP}:13133
+
+  # ===========================================================================
+  # RECEIVERS
+  # ===========================================================================
+  receivers:
+    # K8s resource topology receiver - pulls resource relationships
+    k8sobjects/topology:
+      auth_type: serviceAccount
+      objects:
+        # Pods with ownerReferences
+        - name: pods
+          mode: pull
+          interval: 60s
+        # ReplicaSets with ownerReferences to Deployments
+        - name: replicasets
+          mode: pull
+          interval: 60s
+          group: apps
+        # Deployments as top-level workload controllers
+        - name: deployments
+          mode: pull
+          interval: 60s
+          group: apps
+        # StatefulSets as workload controllers
+        - name: statefulsets
+          mode: pull
+          interval: 60s
+          group: apps
+        # DaemonSets as workload controllers
+        - name: daemonsets
+          mode: pull
+          interval: 60s
+          group: apps
+        # Services with selectors
+        - name: services
+          mode: pull
+          interval: 60s
+        # Ingresses with backend references
+        - name: ingresses
+          mode: pull
+          interval: 120s
+          group: networking.k8s.io
+
+    # -------------------------------------------------------------------------
+    # SERVICE CATALOG RECEIVER
+    # -------------------------------------------------------------------------
+    # Pulls workload controllers for service catalog at slower interval
+    # Extracts: name, namespace, replicas, annotations (team, owner, tier, runbook)
+    k8sobjects/service_catalog:
+      auth_type: serviceAccount
+      objects:
+        # Deployments - most common workload type
+        - name: deployments
+          mode: pull
+          interval: 300s  # 5 minutes - catalog doesn't need real-time
+          group: apps
+        # StatefulSets - stateful workloads
+        - name: statefulsets
+          mode: pull
+          interval: 300s
+          group: apps
+        # DaemonSets - node-level services
+        - name: daemonsets
+          mode: pull
+          interval: 300s
+          group: apps
+        # Services - network endpoints
+        - name: services
+          mode: pull
+          interval: 300s
+
+  # ===========================================================================
+  # PROCESSORS
+  # ===========================================================================
+  processors:
+    # -------------------------------------------------------------------------
+    # Memory Management
+    # -------------------------------------------------------------------------
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 85
+      spike_limit_percentage: 15
+
+    # -------------------------------------------------------------------------
+    # Batching
+    # -------------------------------------------------------------------------
+    batch:
+      send_batch_size: 1000
+      send_batch_max_size: 1000
+      timeout: 5s
+
+    # -------------------------------------------------------------------------
+    # EVENTS ENRICHMENT (Topology-enriched)
+    # -------------------------------------------------------------------------
+    transform/events:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Set service name from event domain and resource
+            - set(resource.attributes["service.name"], Concat([attributes["event.domain"], attributes["k8s.resource.name"]], "-"))
+
+            # Set cluster name
+            - set(resource.attributes["cluster.name"], "${env:CLUSTER_NAME}")
+
+            # Set deployment environment
+            - set(resource.attributes["deployment.environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+
+            # Last9 expected attributes
+            - set(resource.attributes["Environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+
+            # Set timestamp from event creation time
+            - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")))
+              where time_unix_nano == 0
+
+            # Set severity based on event type
+            - set(severity_text, "INFO") where body["object"]["type"] == "Normal"
+            - set(severity_text, "WARN") where body["object"]["type"] == "Warning"
+            - set(severity_text, "ERROR") where body["object"]["type"] == "Error"
+
+            - set(severity_number, SEVERITY_NUMBER_INFO) where body["object"]["type"] == "Normal"
+            - set(severity_number, SEVERITY_NUMBER_WARN) where body["object"]["type"] == "Warning"
+            - set(severity_number, SEVERITY_NUMBER_ERROR) where body["object"]["type"] == "Error"
+
+            # Topology enrichment: extract affected resource details
+            - set(attributes["k8s.event.reason"], body["object"]["reason"])
+            - set(attributes["k8s.event.message"], body["object"]["message"])
+            - set(attributes["k8s.event.involved_object.kind"], body["object"]["involvedObject"]["kind"])
+            - set(attributes["k8s.event.involved_object.name"], body["object"]["involvedObject"]["name"])
+            - set(attributes["k8s.event.involved_object.namespace"], body["object"]["involvedObject"]["namespace"])
+            - set(attributes["k8s.event.count"], body["object"]["count"])
+
+    # -------------------------------------------------------------------------
+    # TOPOLOGY EXTRACTION
+    # -------------------------------------------------------------------------
+    transform/topology:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Set service name to identify topology data
+            - set(resource.attributes["service.name"], "k8s-topology")
+            - set(resource.attributes["cluster.name"], "${env:CLUSTER_NAME}")
+            - set(resource.attributes["deployment.environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+
+            # Last9 expected attributes
+            - set(resource.attributes["Environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+
+            # Extract resource kind and name
+            - set(attributes["k8s.resource.kind"], body["object"]["kind"])
+            - set(attributes["k8s.resource.name"], body["object"]["metadata"]["name"])
+            - set(attributes["k8s.namespace.name"], body["object"]["metadata"]["namespace"])
+            - set(attributes["k8s.resource.uid"], body["object"]["metadata"]["uid"])
+
+            # Extract ownerReferences (first owner)
+            - set(attributes["k8s.owner.kind"], body["object"]["metadata"]["ownerReferences"][0]["kind"])
+              where body["object"]["metadata"]["ownerReferences"] != nil
+            - set(attributes["k8s.owner.name"], body["object"]["metadata"]["ownerReferences"][0]["name"])
+              where body["object"]["metadata"]["ownerReferences"] != nil
+            - set(attributes["k8s.owner.uid"], body["object"]["metadata"]["ownerReferences"][0]["uid"])
+              where body["object"]["metadata"]["ownerReferences"] != nil
+
+            # Pod-specific attributes
+            - set(attributes["k8s.pod.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "Pod"
+            - set(attributes["k8s.pod.phase"], body["object"]["status"]["phase"])
+              where body["object"]["kind"] == "Pod"
+            - set(attributes["k8s.pod.node"], body["object"]["spec"]["nodeName"])
+              where body["object"]["kind"] == "Pod"
+
+            # Deployment-specific attributes
+            - set(attributes["k8s.deployment.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "Deployment"
+            - set(attributes["k8s.deployment.replicas"], body["object"]["spec"]["replicas"])
+              where body["object"]["kind"] == "Deployment"
+            - set(attributes["k8s.deployment.available_replicas"], body["object"]["status"]["availableReplicas"])
+              where body["object"]["kind"] == "Deployment"
+
+            # StatefulSet-specific attributes
+            - set(attributes["k8s.statefulset.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "StatefulSet"
+            - set(attributes["k8s.statefulset.replicas"], body["object"]["spec"]["replicas"])
+              where body["object"]["kind"] == "StatefulSet"
+
+            # DaemonSet-specific attributes
+            - set(attributes["k8s.daemonset.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "DaemonSet"
+            - set(attributes["k8s.daemonset.desired"], body["object"]["status"]["desiredNumberScheduled"])
+              where body["object"]["kind"] == "DaemonSet"
+            - set(attributes["k8s.daemonset.ready"], body["object"]["status"]["numberReady"])
+              where body["object"]["kind"] == "DaemonSet"
+
+            # Service-specific attributes
+            - set(attributes["k8s.service.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "Service"
+            - set(attributes["k8s.service.type"], body["object"]["spec"]["type"])
+              where body["object"]["kind"] == "Service"
+            - set(attributes["k8s.service.cluster_ip"], body["object"]["spec"]["clusterIP"])
+              where body["object"]["kind"] == "Service"
+
+            # Ingress-specific attributes
+            - set(attributes["k8s.ingress.name"], body["object"]["metadata"]["name"])
+              where body["object"]["kind"] == "Ingress"
+
+            # Extract labels for selector matching
+            - merge_maps(attributes, body["object"]["metadata"]["labels"], "upsert")
+              where body["object"]["metadata"]["labels"] != nil
+
+            # Set timestamp from resource metadata
+            - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")))
+              where time_unix_nano == 0
+
+    # -------------------------------------------------------------------------
+    # SERVICE CATALOG EXTRACTION
+    # -------------------------------------------------------------------------
+    # Builds service catalog entries from K8s workload controllers
+    # Uses standard Kubernetes labels and annotations
+    #
+    # Standard Labels (app.kubernetes.io/*):
+    #   app.kubernetes.io/name       - Application name
+    #   app.kubernetes.io/instance   - Instance identifier
+    #   app.kubernetes.io/version    - Application version
+    #   app.kubernetes.io/component  - Component within architecture
+    #   app.kubernetes.io/part-of    - Higher-level application/team
+    #   app.kubernetes.io/managed-by - Tool managing the resource
+    #
+    # Standard Annotations:
+    #   kubernetes.io/description    - Resource description
+    # -------------------------------------------------------------------------
+    transform/service_catalog:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Mark as service catalog entry
+            - set(resource.attributes["telemetry.type"], "service_catalog")
+            - set(resource.attributes["service.name"], "k8s-service-catalog")
+
+            # Cluster context
+            - set(resource.attributes["cluster.name"], "${env:CLUSTER_NAME}")
+            - set(resource.attributes["deployment.environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+            - set(resource.attributes["Environment"], "${env:DEPLOYMENT_ENVIRONMENT}")
+
+            # ─────────────────────────────────────────────────────────────────
+            # Core Service Identity (Standard K8s Labels)
+            # ─────────────────────────────────────────────────────────────────
+            # Service name: app.kubernetes.io/name > app label > metadata.name
+            - set(attributes["service.catalog.name"], body["object"]["metadata"]["labels"]["app.kubernetes.io/name"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/name"] != nil
+            - set(attributes["service.catalog.name"], body["object"]["metadata"]["labels"]["app"])
+              where attributes["service.catalog.name"] == nil and body["object"]["metadata"]["labels"]["app"] != nil
+            - set(attributes["service.catalog.name"], body["object"]["metadata"]["name"])
+              where attributes["service.catalog.name"] == nil
+
+            # Namespace and kind
+            - set(attributes["service.catalog.namespace"], body["object"]["metadata"]["namespace"])
+            - set(attributes["service.catalog.kind"], body["object"]["kind"])
+            - set(attributes["service.catalog.uid"], body["object"]["metadata"]["uid"])
+
+            # Instance identifier
+            - set(attributes["service.catalog.instance"], body["object"]["metadata"]["labels"]["app.kubernetes.io/instance"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/instance"] != nil
+
+            # ─────────────────────────────────────────────────────────────────
+            # Standard K8s Labels (app.kubernetes.io/*)
+            # ─────────────────────────────────────────────────────────────────
+            # Team/project from part-of (higher-level application grouping)
+            - set(attributes["service.catalog.team"], body["object"]["metadata"]["labels"]["app.kubernetes.io/part-of"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/part-of"] != nil
+
+            # Version
+            - set(attributes["service.catalog.version"], body["object"]["metadata"]["labels"]["app.kubernetes.io/version"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/version"] != nil
+
+            # Component
+            - set(attributes["service.catalog.component"], body["object"]["metadata"]["labels"]["app.kubernetes.io/component"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/component"] != nil
+
+            # Managed by
+            - set(attributes["service.catalog.managed_by"], body["object"]["metadata"]["labels"]["app.kubernetes.io/managed-by"])
+              where body["object"]["metadata"]["labels"]["app.kubernetes.io/managed-by"] != nil
+
+            # ─────────────────────────────────────────────────────────────────
+            # Description (standard kubernetes.io annotation)
+            # ─────────────────────────────────────────────────────────────────
+            - set(attributes["service.catalog.description"], body["object"]["metadata"]["annotations"]["kubernetes.io/description"])
+              where body["object"]["metadata"]["annotations"]["kubernetes.io/description"] != nil
+
+            # ─────────────────────────────────────────────────────────────────
+            # Workload Status (Deployment/StatefulSet/DaemonSet)
+            # ─────────────────────────────────────────────────────────────────
+            # Deployment status
+            - set(attributes["service.catalog.replicas.desired"], body["object"]["spec"]["replicas"])
+              where body["object"]["kind"] == "Deployment"
+            - set(attributes["service.catalog.replicas.available"], body["object"]["status"]["availableReplicas"])
+              where body["object"]["kind"] == "Deployment"
+            - set(attributes["service.catalog.replicas.ready"], body["object"]["status"]["readyReplicas"])
+              where body["object"]["kind"] == "Deployment"
+
+            # StatefulSet status
+            - set(attributes["service.catalog.replicas.desired"], body["object"]["spec"]["replicas"])
+              where body["object"]["kind"] == "StatefulSet"
+            - set(attributes["service.catalog.replicas.ready"], body["object"]["status"]["readyReplicas"])
+              where body["object"]["kind"] == "StatefulSet"
+
+            # DaemonSet status
+            - set(attributes["service.catalog.replicas.desired"], body["object"]["status"]["desiredNumberScheduled"])
+              where body["object"]["kind"] == "DaemonSet"
+            - set(attributes["service.catalog.replicas.ready"], body["object"]["status"]["numberReady"])
+              where body["object"]["kind"] == "DaemonSet"
+
+            # ─────────────────────────────────────────────────────────────────
+            # Service Endpoints (for Service kind)
+            # ─────────────────────────────────────────────────────────────────
+            - set(attributes["service.catalog.service_type"], body["object"]["spec"]["type"])
+              where body["object"]["kind"] == "Service"
+            - set(attributes["service.catalog.cluster_ip"], body["object"]["spec"]["clusterIP"])
+              where body["object"]["kind"] == "Service"
+
+            # ─────────────────────────────────────────────────────────────────
+            # Timestamps
+            # ─────────────────────────────────────────────────────────────────
+            - set(attributes["service.catalog.created_at"], body["object"]["metadata"]["creationTimestamp"])
+            - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ")))
+              where time_unix_nano == 0
+
+    # -------------------------------------------------------------------------
+    # SERVICE CATALOG FILTER
+    # -------------------------------------------------------------------------
+    # Only process workload controllers (skip pods, replicasets, etc.)
+    filter/service_catalog:
+      error_mode: ignore
+      logs:
+        log_record:
+          - 'body["object"]["kind"] == "Pod"'
+          - 'body["object"]["kind"] == "ReplicaSet"'
+          - 'body["object"]["kind"] == "ConfigMap"'
+          - 'body["object"]["kind"] == "Secret"'
+
+  # ===========================================================================
+  # EXPORTERS
+  # ===========================================================================
+  exporters:
+    # Debug exporter for troubleshooting
+    debug:
+      verbosity: basic
+      sampling_initial: 5
+      sampling_thereafter: 200
+
+    # OTLP exporter for events and topology to Last9
+    otlp/last9:
+      endpoint: "${env:LAST9_OTLP_ENDPOINT}"
+      headers:
+        "Authorization": "${env:LAST9_AUTH_TOKEN}"
+
+  # ===========================================================================
+  # SERVICE CONFIGURATION
+  # ===========================================================================
+  service:
+    telemetry:
+      metrics:
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: ${env:MY_POD_IP}
+                  port: 8888
+
+    extensions:
+      - health_check
+
+    pipelines:
+      # -----------------------------------------------------------------------
+      # EVENTS PIPELINE (K8s events with topology enrichment)
+      # -----------------------------------------------------------------------
+      logs/events:
+        receivers:
+          - k8sobjects
+        processors:
+          - memory_limiter
+          - transform/events
+          - batch
+        exporters:
+          - otlp/last9
+
+      # -----------------------------------------------------------------------
+      # TOPOLOGY PIPELINE (Resource relationships)
+      # -----------------------------------------------------------------------
+      logs/topology:
+        receivers:
+          - k8sobjects/topology
+        processors:
+          - memory_limiter
+          - transform/topology
+          - batch
+        exporters:
+          - otlp/last9
+
+      # -----------------------------------------------------------------------
+      # SERVICE CATALOG PIPELINE (Service inventory with ownership)
+      # -----------------------------------------------------------------------
+      logs/service_catalog:
+        receivers:
+          - k8sobjects/service_catalog
+        processors:
+          - memory_limiter
+          - filter/service_catalog
+          - transform/service_catalog
+          - batch
+        exporters:
+          - otlp/last9
+
+# -----------------------------------------------------------------------------
+# Image Configuration
+# -----------------------------------------------------------------------------
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  pullPolicy: IfNotPresent
+  tag: "0.126.0"
+
+# -----------------------------------------------------------------------------
+# Service Configuration (not needed for cluster agent)
+# -----------------------------------------------------------------------------
+service:
+  enabled: false
+
+# -----------------------------------------------------------------------------
+# Ports Configuration (minimal - no external receivers)
+# -----------------------------------------------------------------------------
+ports:
+  otlp:
+    enabled: false
+  otlp-http:
+    enabled: false
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# Extra Environment Variables
+# -----------------------------------------------------------------------------
+extraEnvs:
+  - name: CLUSTER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.labels['cluster-name']
+  - name: DEPLOYMENT_ENVIRONMENT
+    value: "production"
+  # Last9 credentials - override via helm install --set or external secret
+  - name: LAST9_OTLP_ENDPOINT
+    value: ""
+  - name: LAST9_AUTH_TOKEN
+    value: ""
+
+# -----------------------------------------------------------------------------
+# Pod Configuration
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------------
+# Service Account
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

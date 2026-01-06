@@ -1,0 +1,242 @@
+# =============================================================================
+# Last9 OpenTelemetry Collector - eBPF Network Flow Configuration
+# =============================================================================
+# Supplementary values for enabling eBPF-based network flow collection.
+# Use in combination with values.yaml:
+#
+#   helm install last9-collector opentelemetry/opentelemetry-collector \
+#     -f values.yaml -f values-ebpf.yaml -n last9
+#
+# Requirements:
+#   - Kernel 5.x+ (4.14+ minimum with reduced functionality)
+#   - Privileged container support
+#   - Not supported on GKE Autopilot
+#
+# Version: 1.0.0
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Security Context - Privileged access for eBPF
+# -----------------------------------------------------------------------------
+securityContext:
+  # Required for eBPF program loading
+  privileged: true
+  runAsUser: 0
+  runAsGroup: 0
+
+podSecurityContext:
+  runAsUser: 0
+  runAsGroup: 0
+  fsGroup: 0
+
+# -----------------------------------------------------------------------------
+# Host Access - Required for network visibility
+# -----------------------------------------------------------------------------
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+# -----------------------------------------------------------------------------
+# Volume Mounts - eBPF and kernel access
+# -----------------------------------------------------------------------------
+extraVolumes:
+  # BPF filesystem for eBPF maps
+  - name: bpf-fs
+    hostPath:
+      path: /sys/fs/bpf
+      type: DirectoryOrCreate
+
+  # Debug filesystem for tracepoints
+  - name: debugfs
+    hostPath:
+      path: /sys/kernel/debug
+      type: Directory
+
+  # Cgroup filesystem for container identification
+  - name: cgroup
+    hostPath:
+      path: /sys/fs/cgroup
+      type: Directory
+
+  # Kernel modules (for BTF if not built-in)
+  - name: modules
+    hostPath:
+      path: /lib/modules
+      type: Directory
+
+  # Boot config for kernel version detection
+  - name: boot
+    hostPath:
+      path: /boot
+      type: DirectoryOrCreate
+
+extraVolumeMounts:
+  - name: bpf-fs
+    mountPath: /sys/fs/bpf
+    mountPropagation: Bidirectional
+
+  - name: debugfs
+    mountPath: /sys/kernel/debug
+    readOnly: true
+
+  - name: cgroup
+    mountPath: /sys/fs/cgroup
+    readOnly: true
+
+  - name: modules
+    mountPath: /lib/modules
+    readOnly: true
+
+  - name: boot
+    mountPath: /boot
+    readOnly: true
+
+# -----------------------------------------------------------------------------
+# Resource Adjustment for eBPF processing
+# -----------------------------------------------------------------------------
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 200m
+    memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# Additional Environment Variables for eBPF
+# -----------------------------------------------------------------------------
+extraEnvs:
+  # Enable eBPF features
+  - name: OTEL_EBPF_ENABLED
+    value: "true"
+
+  # Host proc for container PID mapping
+  - name: HOST_PROC
+    value: "/host/proc"
+
+  # Host sys for kernel info
+  - name: HOST_SYS
+    value: "/host/sys"
+
+# -----------------------------------------------------------------------------
+# Collector Configuration Extensions for eBPF
+# -----------------------------------------------------------------------------
+# Note: Native OTel eBPF receiver is not yet GA. This config prepares for:
+# 1. Integration with Cilium Hubble (exports to OTLP)
+# 2. Integration with Grafana Beyla (eBPF auto-instrumentation)
+# 3. Future OTel eBPF receivers
+# -----------------------------------------------------------------------------
+config:
+  receivers:
+    # Receive flows from Cilium Hubble (if installed)
+    # Hubble can export to OTLP: hubble export --otlp-address=localhost:4317
+    otlp/hubble:
+      protocols:
+        grpc:
+          endpoint: ${env:MY_POD_IP}:4319
+
+    # Prometheus receiver for eBPF-based metrics exporters
+    prometheus:
+      config:
+        scrape_configs:
+          # Scrape Cilium Hubble metrics
+          - job_name: 'hubble'
+            scrape_interval: 30s
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_label_k8s_app]
+                action: keep
+                regex: hubble-relay
+              - source_labels: [__meta_kubernetes_pod_ip]
+                action: replace
+                target_label: __address__
+                regex: (.+)
+                replacement: $1:9965
+
+          # Scrape Grafana Beyla metrics (if installed)
+          - job_name: 'beyla'
+            scrape_interval: 30s
+            kubernetes_sd_configs:
+              - role: pod
+            relabel_configs:
+              - source_labels: [__meta_kubernetes_pod_label_app]
+                action: keep
+                regex: beyla
+              - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                action: replace
+                regex: ([^:]+);(\d+)
+                replacement: $1:$2
+                target_label: __address__
+
+  processors:
+    # Transform network flow data
+    transform/network_flows:
+      error_mode: ignore
+      log_statements:
+        - context: log
+          statements:
+            # Tag network flow data
+            - set(attributes["telemetry.type"], "network_flow")
+              where attributes["cilium.flow_type"] != nil or attributes["hubble.flow_type"] != nil
+
+            # Normalize source/destination attributes
+            - set(attributes["net.src.name"], attributes["source.workload"])
+              where attributes["source.workload"] != nil
+            - set(attributes["net.dst.name"], attributes["destination.workload"])
+              where attributes["destination.workload"] != nil
+
+  service:
+    pipelines:
+      # Network flows pipeline (from Hubble/Beyla)
+      logs/network:
+        receivers:
+          - otlp/hubble
+        processors:
+          - memory_limiter
+          - transform/network_flows
+          - batch
+        exporters:
+          - otlp/last9
+
+# -----------------------------------------------------------------------------
+# Additional Ports for eBPF integrations
+# -----------------------------------------------------------------------------
+ports:
+  hubble:
+    enabled: true
+    containerPort: 4319
+    servicePort: 4319
+    protocol: TCP
+    appProtocol: grpc
+
+# -----------------------------------------------------------------------------
+# RBAC Extensions for eBPF
+# -----------------------------------------------------------------------------
+clusterRole:
+  rules:
+    # Additional permissions for network policy inspection
+    - apiGroups: ["networking.k8s.io"]
+      resources:
+        - networkpolicies
+      verbs: ["get", "list", "watch"]
+    # Cilium-specific resources (if using Cilium)
+    - apiGroups: ["cilium.io"]
+      resources:
+        - ciliumnetworkpolicies
+        - ciliumendpoints
+      verbs: ["get", "list", "watch"]
+
+# -----------------------------------------------------------------------------
+# Tolerations - Run on all nodes including control plane
+# -----------------------------------------------------------------------------
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+  - operator: Exists
+    effect: NoExecute
+
+# -----------------------------------------------------------------------------
+# Node Selector (optional - uncomment to restrict eBPF to specific nodes)
+# -----------------------------------------------------------------------------
+# nodeSelector:
+#   last9.io/ebpf-enabled: "true"

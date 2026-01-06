@@ -1,78 +1,284 @@
+# =============================================================================
+# Last9 OpenTelemetry Instrumentation Configuration
+# =============================================================================
+# Auto-instrumentation settings for application telemetry.
+# Enables trace-log correlation via SDK injection.
+#
+# Usage: Apply annotation to pods:
+#   instrumentation.opentelemetry.io/inject-java: "true"
+#   instrumentation.opentelemetry.io/inject-python: "true"
+#   instrumentation.opentelemetry.io/inject-nodejs: "true"
+#   instrumentation.opentelemetry.io/inject-dotnet: "true"
+#   instrumentation.opentelemetry.io/inject-go: "true"
+#
+# Version: 2.1.0
+# =============================================================================
 apiVersion: opentelemetry.io/v1alpha1
 kind: Instrumentation
 metadata:
   name: l9-instrumentation
+  namespace: last9
 spec:
+  # ---------------------------------------------------------------------------
+  # Propagation & Sampling
+  # ---------------------------------------------------------------------------
   propagators:
     - tracecontext
     - baggage
     - b3
   sampler:
     type: parentbased_traceidratio
-    argument: "1.0"
+    argument: "1.0"  # 100% sampling - adjust per environment
+
+  # ---------------------------------------------------------------------------
+  # Exporter Configuration (shared)
+  # ---------------------------------------------------------------------------
+  exporter:
+    endpoint: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+
+  # ---------------------------------------------------------------------------
+  # Java Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  # Frameworks: Spring Boot, Micronaut, Quarkus, Vert.x, etc.
+  # Trace-log correlation: Injects trace_id/span_id into SLF4J MDC
+  # DB instrumentation: JDBC, Hibernate, JPA auto-traced
+  # ---------------------------------------------------------------------------
   java:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:latest
     env:
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otel-collector-service.last9.svc.cluster.local:4318"
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: "http/protobuf"
-        - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
-          value: "512"
-        - name: OTEL_BSP_EXPORT_TIMEOUT
-          value: "2s"
-        - name: OTEL_BSP_SCHEDULE_DELAY
-          value: "1s"
-        - name: OTEL_EXPORTER_OTLP_COMPRESSION
-          value: "gzip"
-        - name: OTEL_EXPORTER_OTLP_TIMEOUT
-          value: "10s"
-        - name: OTEL_METRICS_EXPORTER
-          value: "none"
-        - name: OTEL_LOGS_EXPORTER
-          value: "none"
-        - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "deployment.environment=local"
-  nodejs:
-    env:
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: "http://otel-collector-service.last9.svc.cluster.local:4318"
-        - name: OTEL_EXPORTER_OTLP_PROTOCOL
-          value: "http/protobuf"
-        - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
-          value: "512"
-        - name: OTEL_BSP_EXPORT_TIMEOUT
-          value: "2s"
-        - name: OTEL_BSP_SCHEDULE_DELAY
-          value: "1s"
-        - name: OTEL_EXPORTER_OTLP_COMPRESSION
-          value: "gzip"
-        - name: OTEL_EXPORTER_OTLP_TIMEOUT
-          value: "10s"
-        - name: OTEL_METRICS_EXPORTER
-          value: "none"
-        - name: OTEL_LOGS_EXPORTER
-          value: "none"
-        - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "deployment.environment=local"
-  python:
-      env:
+      # Exporter configuration
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
-        value: http://otel-collector-service.last9.svc.cluster.local:4318
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
       - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: http/protobuf
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_COMPRESSION
+        value: "gzip"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "10s"
+
+      # Batch span processor settings
+      - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
+        value: "512"
+      - name: OTEL_BSP_EXPORT_TIMEOUT
+        value: "2s"
+      - name: OTEL_BSP_SCHEDULE_DELAY
+        value: "1s"
+
+      # Signal exporters - LOGS ENABLED for trace-log correlation
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_METRICS_EXPORTER
+        value: "none"
+      - name: OTEL_LOGS_EXPORTER
+        value: "otlp"
+
+      # Resource attributes
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
+
+      # Java-specific: Enable log context injection (trace-log correlation)
+      - name: OTEL_INSTRUMENTATION_LOGBACK_APPENDER_ENABLED
+        value: "true"
+      - name: OTEL_INSTRUMENTATION_LOG4J_APPENDER_ENABLED
+        value: "true"
+
+      # Java-specific: DB instrumentation settings
+      - name: OTEL_INSTRUMENTATION_JDBC_ENABLED
+        value: "true"
+      - name: OTEL_INSTRUMENTATION_HIBERNATE_ENABLED
+        value: "true"
+
+  # ---------------------------------------------------------------------------
+  # Node.js Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  # Frameworks: Express, Fastify, Koa, NestJS, etc.
+  # Trace-log correlation: Winston/Pino/Bunyan integration
+  # DB instrumentation: pg, mysql, mongodb, redis auto-traced
+  # ---------------------------------------------------------------------------
+  nodejs:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:latest
+    env:
+      # Exporter configuration
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_COMPRESSION
+        value: "gzip"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "10s"
+
+      # Batch span processor settings
+      - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
+        value: "512"
+      - name: OTEL_BSP_EXPORT_TIMEOUT
+        value: "2s"
+      - name: OTEL_BSP_SCHEDULE_DELAY
+        value: "1s"
+
+      # Signal exporters - LOGS ENABLED for trace-log correlation
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_METRICS_EXPORTER
+        value: "none"
+      - name: OTEL_LOGS_EXPORTER
+        value: "otlp"
+
+      # Resource attributes
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
+
+      # Node.js-specific: Enable HTTP, DB, RPC, and messaging instrumentations
+      - name: OTEL_NODE_ENABLED_INSTRUMENTATIONS
+        value: "http,express,fastify,koa,nestjs-core,pg,mysql,mysql2,mongodb,redis,ioredis,graphql,grpc,kafkajs,amqplib"
+
+  # ---------------------------------------------------------------------------
+  # Python Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  # Frameworks: Django, Flask, FastAPI, etc.
+  # Trace-log correlation: logging module integration
+  # DB instrumentation: psycopg2, pymysql, pymongo, redis auto-traced
+  # ---------------------------------------------------------------------------
+  python:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:latest
+    env:
+      # Exporter configuration
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_COMPRESSION
+        value: "gzip"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "10"
+
+      # Batch span processor settings
       - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
         value: "512"
       - name: OTEL_BSP_EXPORT_TIMEOUT
         value: "2"
       - name: OTEL_BSP_SCHEDULE_DELAY
         value: "1"
-      - name: OTEL_EXPORTER_OTLP_COMPRESSION
-        value: gzip
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "10"
+
+      # Signal exporters - LOGS ENABLED for trace-log correlation
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_METRICS_EXPORTER
+        value: "none"
       - name: OTEL_LOGS_EXPORTER
-        value: none
+        value: "otlp"
+
+      # Resource attributes
       - name: OTEL_RESOURCE_ATTRIBUTES
-        value: deployment.environment=local
+        value: "deployment.environment=local"
+
+      # Python-specific: Disable system metrics (reduces noise)
       - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
-        value: system-metrics
+        value: "system-metrics"
+
+      # Python-specific: Enable logging instrumentation (trace-log correlation)
+      - name: OTEL_PYTHON_LOGGING_AUTO_INSTRUMENTATION_ENABLED
+        value: "true"
+
+      # Python-specific: Log format with trace context
+      - name: OTEL_PYTHON_LOG_FORMAT
+        value: "%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s] %(message)s"
+
+  # ---------------------------------------------------------------------------
+  # .NET Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  # Frameworks: ASP.NET Core, Entity Framework, etc.
+  # Trace-log correlation: ILogger integration with trace context
+  # DB instrumentation: SqlClient, Npgsql, MySqlConnector auto-traced
+  # ---------------------------------------------------------------------------
+  dotnet:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-dotnet:latest
+    env:
+      # Exporter configuration
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "10000"
+
+      # Signal exporters - LOGS ENABLED for trace-log correlation
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_METRICS_EXPORTER
+        value: "none"
+      - name: OTEL_LOGS_EXPORTER
+        value: "otlp"
+
+      # Resource attributes
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
+
+      # .NET-specific: Enable all instrumentations
+      - name: OTEL_DOTNET_AUTO_TRACES_INSTRUMENTATION_ENABLED
+        value: "true"
+      - name: OTEL_DOTNET_AUTO_LOGS_INSTRUMENTATION_ENABLED
+        value: "true"
+
+      # .NET-specific: Enable ILogger integration for trace-log correlation
+      - name: OTEL_DOTNET_AUTO_LOGS_INCLUDE_FORMATTED_MESSAGE
+        value: "true"
+
+  # ---------------------------------------------------------------------------
+  # Go Auto-Instrumentation (eBPF-based)
+  # ---------------------------------------------------------------------------
+  # Requires: Kernel 4.4+ with eBPF support
+  # Frameworks: net/http, gin, echo, gRPC
+  # DB instrumentation: database/sql, pgx, go-redis auto-traced
+  # Note: eBPF-based, no code changes required but limited to supported libs
+  # ---------------------------------------------------------------------------
+  go:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-go:latest
+    env:
+      # Exporter configuration
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+
+      # Signal exporters
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_METRICS_EXPORTER
+        value: "none"
+      - name: OTEL_LOGS_EXPORTER
+        value: "otlp"
+
+      # Resource attributes
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
+
+      # Go-specific: Enable all available instrumentations
+      - name: OTEL_GO_AUTO_TARGET_EXE
+        value: ""  # Auto-detect, or specify path to executable
+
+  # ---------------------------------------------------------------------------
+  # Apache HTTP Server Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  apacheHttpd:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd:latest
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
+
+  # ---------------------------------------------------------------------------
+  # Nginx Auto-Instrumentation
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-apache-httpd:latest
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://last9-otel-collector.last9.svc.cluster.local:4318"
+      - name: OTEL_TRACES_EXPORTER
+        value: "otlp"
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "deployment.environment=local"
