@@ -221,6 +221,40 @@ config:
             # Priority 4: namespace name (common pattern: prod, staging, dev, etc.)
             - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
               where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil
+            #
+            # Per-service sampling rate (for use with tail_sampling or probabilistic_sampler)
+            # Copy last9.io/sample-rate annotation to attribute for potential sampling decisions
+            - set(attributes["last9.sample_rate"], attributes["k8s.pod.annotations.last9.io/sample-rate"])
+              where attributes["k8s.pod.annotations.last9.io/sample-rate"] != nil
+    # ===========================================================================
+    # OPTIONAL: Per-Service Tail Sampling (uncomment to enable)
+    # ===========================================================================
+    # Use this when you need different sampling rates per service.
+    # Note: Requires more memory and adds latency (decision_wait).
+    #
+    # tail_sampling:
+    #   decision_wait: 10s
+    #   num_traces: 100000
+    #   policies:
+    #     # High-traffic services: sample 10%
+    #     - name: high-traffic-services
+    #       type: and
+    #       and:
+    #         and_sub_policy:
+    #           - name: service-name-filter
+    #             type: string_attribute
+    #             string_attribute:
+    #               key: service.name
+    #               values: [payment-service, api-gateway]
+    #           - name: probabilistic-10
+    #             type: probabilistic
+    #             probabilistic:
+    #               sampling_percentage: 10
+    #     # Low-traffic services: sample 100%
+    #     - name: default-policy
+    #       type: probabilistic
+    #       probabilistic:
+    #         sampling_percentage: 100
     memory_limiter/logs:
       # check_interval is the time between measurements of memory usage.
       check_interval: 5s

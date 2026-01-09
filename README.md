@@ -86,9 +86,24 @@ Instrument namespaces without modifying deployments:
 
 # Exclude specific namespaces
 ./last9-otel-setup.sh auto-instrument-exclude=staging,dev token="..." endpoint="..."
+
+# Instrument AND restart existing workloads immediately
+./last9-otel-setup.sh auto-instrument=all restart-workloads token="..." endpoint="..."
 ```
 
 **System namespaces are always excluded:** `kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, `istio-system`, `linkerd`, `monitoring`, `prometheus`, `grafana`, `argocd`, `flux-system`, `last9`
+
+### Workload Restart Control
+
+By default, only **new pods** are instrumented. Existing pods require a restart.
+
+```bash
+# Option 1: Restart during setup (recommended for initial deployment)
+./last9-otel-setup.sh auto-instrument=all restart-workloads token="..." endpoint="..."
+
+# Option 2: Manual restart after setup
+kubectl rollout restart deployment -n <namespace>
+```
 
 ### Per-Deployment Instrumentation
 
@@ -103,6 +118,22 @@ metadata:
     # instrumentation.opentelemetry.io/inject-nodejs: "last9/l9-instrumentation"
     # instrumentation.opentelemetry.io/inject-dotnet: "last9/l9-instrumentation"
     # instrumentation.opentelemetry.io/inject-php: "last9/l9-instrumentation"
+```
+
+### Opt-Out Specific Deployments
+
+Exclude specific pods/deployments from namespace-level instrumentation:
+
+```yaml
+metadata:
+  annotations:
+    # Disable Java instrumentation for this deployment
+    instrumentation.opentelemetry.io/inject-java: "false"
+    # Disable all languages
+    instrumentation.opentelemetry.io/inject-python: "false"
+    instrumentation.opentelemetry.io/inject-nodejs: "false"
+    instrumentation.opentelemetry.io/inject-dotnet: "false"
+    instrumentation.opentelemetry.io/inject-php: "false"
 ```
 
 ## Service Name & Environment Detection
@@ -134,6 +165,29 @@ metadata:
   annotations:
     last9.io/service: "payment-service"
     last9.io/env: "production"
+```
+
+## Sampling Configuration
+
+### Global Sampling Rate
+
+The default sampling rate is 100% (`1.0`). Modify `instrumentation.yaml`:
+
+```yaml
+spec:
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.1"  # 10% sampling
+```
+
+### Per-Service Sampling
+
+For different sampling rates per service, use the `last9.io/sample-rate` annotation and enable tail sampling in the collector. See `last9-otel-collector-values.yaml` for configuration examples.
+
+```yaml
+metadata:
+  annotations:
+    last9.io/sample-rate: "0.1"  # 10% sampling for this service
 ```
 
 ## Installation Options

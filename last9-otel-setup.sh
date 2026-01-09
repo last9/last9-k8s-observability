@@ -59,6 +59,7 @@ USE_YQ=false
 DEPLOYMENT_ENV=""
 AUTO_INSTRUMENT_NAMESPACES=""
 AUTO_INSTRUMENT_EXCLUDE=""
+RESTART_WORKLOADS=false
 
 # Colors for output
 RED='\033[0;31m'
@@ -891,6 +892,12 @@ parse_arguments() {
             auto-instrument-exclude=*)
                 AUTO_INSTRUMENT_EXCLUDE="${arg#*=}"
                 ;;
+            restart-workloads|restart-workloads=true)
+                RESTART_WORKLOADS=true
+                ;;
+            restart-workloads=false)
+                RESTART_WORKLOADS=false
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -961,6 +968,10 @@ show_help() {
     echo ""
     echo "  auto-instrument-exclude=ns1,ns2  Used with auto-instrument=all to exclude additional namespaces"
     echo "                                   (blacklist)"
+    echo ""
+    echo "  restart-workloads                Restart all deployments/statefulsets/daemonsets in instrumented"
+    echo "                                   namespaces to apply instrumentation immediately"
+    echo "                                   (default: false - only new pods are instrumented)"
     echo ""
     echo "  All supported languages are enabled by default: Java, Python, Node.js, .NET, PHP"
     echo "  (Go, Apache HTTPD, Nginx available but disabled - see instrumentation.yaml)"
@@ -1667,6 +1678,46 @@ instrument_namespace() {
     fi
 }
 
+# Function to restart all workloads in a namespace to apply instrumentation
+restart_workloads_in_namespace() {
+    local ns="$1"
+
+    log_info "  Restarting workloads in namespace: $ns"
+
+    # Restart deployments
+    local deployments
+    deployments=$(kubectl get deployments -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+    if [ -n "$deployments" ]; then
+        for dep in $deployments; do
+            kubectl rollout restart deployment/"$dep" -n "$ns" 2>/dev/null && \
+                log_info "    ✓ Deployment: $dep" || \
+                log_warn "    ⚠ Failed to restart deployment: $dep"
+        done
+    fi
+
+    # Restart statefulsets
+    local statefulsets
+    statefulsets=$(kubectl get statefulsets -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+    if [ -n "$statefulsets" ]; then
+        for sts in $statefulsets; do
+            kubectl rollout restart statefulset/"$sts" -n "$ns" 2>/dev/null && \
+                log_info "    ✓ StatefulSet: $sts" || \
+                log_warn "    ⚠ Failed to restart statefulset: $sts"
+        done
+    fi
+
+    # Restart daemonsets
+    local daemonsets
+    daemonsets=$(kubectl get daemonsets -n "$ns" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+    if [ -n "$daemonsets" ]; then
+        for ds in $daemonsets; do
+            kubectl rollout restart daemonset/"$ds" -n "$ns" 2>/dev/null && \
+                log_info "    ✓ DaemonSet: $ds" || \
+                log_warn "    ⚠ Failed to restart daemonset: $ds"
+        done
+    fi
+}
+
 # Function to disable auto-instrumentation for a single namespace
 uninstrument_namespace() {
     local ns="$1"
@@ -1690,6 +1741,9 @@ uninstrument_namespace() {
 enable_auto_instrumentation() {
     local enabled_namespaces="$1"
     local disabled_namespaces="$2"
+
+    # Track instrumented namespaces for potential restart
+    local instrumented_namespaces=()
 
     # If nothing specified, skip
     if [ -z "$enabled_namespaces" ]; then
@@ -1753,6 +1807,7 @@ enable_auto_instrumentation() {
             fi
 
             instrument_namespace "$ns"
+            instrumented_namespaces+=("$ns")
             count=$((count + 1))
         done
 
@@ -1791,6 +1846,7 @@ enable_auto_instrumentation() {
             fi
 
             instrument_namespace "$ns"
+            instrumented_namespaces+=("$ns")
             count=$((count + 1))
         done
 
@@ -1798,18 +1854,43 @@ enable_auto_instrumentation() {
         log_info "✓ Auto-instrumentation enabled for $count namespaces"
     fi
 
+    # Restart workloads if requested
+    if [ "$RESTART_WORKLOADS" = true ] && [ ${#instrumented_namespaces[@]} -gt 0 ]; then
+        log_info ""
+        log_info "───────────────────────────────────────────────────────────────"
+        log_info "  RESTARTING WORKLOADS"
+        log_info "───────────────────────────────────────────────────────────────"
+        log_info ""
+        log_info "Restarting workloads to apply instrumentation..."
+        log_info ""
+
+        for ns in "${instrumented_namespaces[@]}"; do
+            restart_workloads_in_namespace "$ns"
+        done
+
+        log_info ""
+        log_info "✓ Workloads restarted in ${#instrumented_namespaces[@]} namespaces"
+    fi
+
     log_info ""
     log_info "───────────────────────────────────────────────────────────────"
     log_info "  IMPORTANT NOTES"
     log_info "───────────────────────────────────────────────────────────────"
     log_info ""
-    log_info "• NEW pods will be automatically instrumented"
-    log_info "• EXISTING pods need restart: kubectl rollout restart deployment -n <ns>"
+    if [ "$RESTART_WORKLOADS" = true ]; then
+        log_info "• Workloads have been restarted and instrumentation is active"
+    else
+        log_info "• NEW pods will be automatically instrumented"
+        log_info "• EXISTING pods need restart: kubectl rollout restart deployment -n <ns>"
+        log_info "• Or re-run with: restart-workloads=true"
+    fi
     log_info ""
-    log_info "To OPT-OUT a specific pod, add annotation:"
+    log_info "To OPT-OUT a specific pod/deployment, add annotation:"
     log_info "  instrumentation.opentelemetry.io/inject-java: \"false\""
     log_info "  instrumentation.opentelemetry.io/inject-python: \"false\""
-    log_info "  (repeat for each language)"
+    log_info "  instrumentation.opentelemetry.io/inject-nodejs: \"false\""
+    log_info "  instrumentation.opentelemetry.io/inject-dotnet: \"false\""
+    log_info "  instrumentation.opentelemetry.io/inject-php: \"false\""
     log_info ""
     log_info "To OPT-OUT an entire namespace later:"
     log_info "  kubectl annotate namespace <ns> instrumentation.opentelemetry.io/inject-java-"
