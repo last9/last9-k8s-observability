@@ -151,14 +151,29 @@ config:
       log_statements:
         - context: resource
           statements:
-            # set the service name as app label of the container
-            # - set(attributes["service.name"], attributes["app"]) where attributes["service.name"] == ""
-            - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == ""
-            - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == nil
-            # Additional resource attributes can be set as follows.
-            # Use additional resource attributes to differentiate between clusters and deployments.
-            # set(attributes["<key>"], value)
-            - set(attributes["deployment.environment"], "local")
+            # service.name auto-detection for logs
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service"])
+              where attributes["k8s.pod.annotations.last9.io/service"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app.kubernetes.io/name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/name"] != nil
+            - set(attributes["service.name"], attributes["k8s.deployment.name"])
+              where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app"] != nil
+            - set(attributes["service.name"], attributes["k8s.container.name"])
+              where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
+            #
+            # deployment.environment auto-detection for logs
+            - set(attributes["deployment.environment"], attributes["k8s.pod.annotations.last9.io/env"])
+              where attributes["k8s.pod.annotations.last9.io/env"] != nil
+            - set(attributes["deployment.environment"], attributes["k8s.pod.labels.environment"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.environment"] != nil
+            - set(attributes["deployment.environment"], attributes["k8s.pod.labels.app.kubernetes.io/environment"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
+            - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil
+            #
+            # cluster.name (set via setup script or manually)
             - set(attributes["cluster.name"], "minikube")
     # Transform processor for traces - service name resolution
     # Priority order follows OTel conventions for ecosystem interoperability
@@ -192,6 +207,20 @@ config:
             # Priority 6: Container name (final fallback)
             - set(attributes["service.name"], attributes["k8s.container.name"])
               where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
+            #
+            # deployment.environment auto-detection
+            # Priority 1: last9.io/env annotation (explicit override)
+            - set(attributes["deployment.environment"], attributes["k8s.pod.annotations.last9.io/env"])
+              where attributes["k8s.pod.annotations.last9.io/env"] != nil
+            # Priority 2: environment pod label
+            - set(attributes["deployment.environment"], attributes["k8s.pod.labels.environment"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.environment"] != nil
+            # Priority 3: app.kubernetes.io/environment label (K8s standard)
+            - set(attributes["deployment.environment"], attributes["k8s.pod.labels.app.kubernetes.io/environment"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
+            # Priority 4: namespace name (common pattern: prod, staging, dev, etc.)
+            - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil
     memory_limiter/logs:
       # check_interval is the time between measurements of memory usage.
       check_interval: 5s
