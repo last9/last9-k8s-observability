@@ -169,6 +169,13 @@ metadata:
 
 ## Sampling Configuration
 
+Two approaches for controlling trace sampling:
+
+| Approach | Where | Pros | Cons |
+|----------|-------|------|------|
+| **SDK-level (Head)** | Application | Efficient, low overhead | Decision at trace start |
+| **Collector-level (Tail)** | OTel Collector | See full trace before deciding | Higher memory, latency |
+
 ### Global Sampling Rate
 
 The default sampling rate is 100% (`1.0`). Modify `instrumentation.yaml`:
@@ -180,15 +187,55 @@ spec:
     argument: "0.1"  # 10% sampling
 ```
 
-### Per-Service Sampling
+### Per-Service Sampling (SDK-level, OTel Standard)
 
-For different sampling rates per service, use the `last9.io/sample-rate` annotation and enable tail sampling in the collector. See `last9-otel-collector-values.yaml` for configuration examples.
+Create multiple Instrumentation CRDs with different sampling rates (provided in `instrumentation-sampling.yaml`):
+
+```bash
+# Apply sampling variants
+kubectl apply -f instrumentation-sampling.yaml -n last9
+```
+
+Available presets:
+- `l9-instrumentation` - 100% (default)
+- `l9-instrumentation-50pct` - 50%
+- `l9-instrumentation-10pct` - 10%
+- `l9-instrumentation-1pct` - 1%
+
+Reference by name in your deployment:
 
 ```yaml
 metadata:
   annotations:
-    last9.io/sample-rate: "0.1"  # 10% sampling for this service
+    # Use 10% sampling for this high-traffic service
+    instrumentation.opentelemetry.io/inject-java: "last9/l9-instrumentation-10pct"
 ```
+
+### Per-Service Sampling (Collector-level, Tail Sampling)
+
+For more flexible sampling decisions (e.g., always keep errors, sample by attribute), use the `last9.io/sample-rate` annotation with collector tail sampling.
+
+**Step 1:** Add annotation to your deployment:
+
+```yaml
+metadata:
+  annotations:
+    last9.io/sample-rate: "0.1"  # Hint for 10% sampling
+```
+
+**Step 2:** Enable tail sampling in `last9-otel-collector-values.yaml` (see commented example).
+
+The annotation is extracted to `last9.sample_rate` trace attribute for use in sampling policies.
+
+### When to Use Which
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| Simple rate limiting | SDK-level (head sampling) |
+| Always keep errors | Collector-level (tail sampling) |
+| Sample by service name | Either |
+| Sample by trace duration | Collector-level (tail sampling) |
+| Lowest overhead | SDK-level (head sampling) |
 
 ## Installation Options
 
@@ -312,7 +359,8 @@ kubectl get ns -o json | jq '.items[] | select(.metadata.annotations["instrument
 | `last9-otel-collector-metrics-values.yaml` | Optional metrics scraping |
 | `k8s-monitoring-values.yaml` | Kube-prometheus-stack config |
 | `last9-kube-events-agent-values.yaml` | K8s events agent |
-| `instrumentation.yaml` | Auto-instrumentation config |
+| `instrumentation.yaml` | Auto-instrumentation config (100% sampling) |
+| `instrumentation-sampling.yaml` | Per-service sampling variants (50%, 10%, 1%) |
 | `collector-svc.yaml` | Collector service |
 
 ## Troubleshooting
