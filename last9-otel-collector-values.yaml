@@ -160,8 +160,8 @@ config:
             # set(attributes["<key>"], value)
             - set(attributes["deployment.environment"], "local")
             - set(attributes["cluster.name"], "minikube")
-    # Transform processor for traces - handles service name with DD operator compatibility
-    # Priority order follows Beyla/OTel conventions for ecosystem interoperability
+    # Transform processor for traces - service name resolution
+    # Priority order follows OTel conventions for ecosystem interoperability
     transform/traces/last9:
       error_mode: ignore
       trace_statements:

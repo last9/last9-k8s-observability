@@ -11,7 +11,6 @@ spec:
     type: parentbased_traceidratio
     argument: "1.0"
   # Defaults apply to all languages - set OTEL_SERVICE_NAME from pod label
-  # This takes precedence over DD_SERVICE and prevents DD operator conflicts
   defaults:
     env:
       - name: OTEL_SERVICE_NAME
@@ -84,3 +83,61 @@ spec:
         value: deployment.environment=local
       - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
         value: system-metrics
+  dotnet:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://otel-collector-service.last9.svc.cluster.local:4318
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: http/protobuf
+      - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
+        value: "512"
+      - name: OTEL_BSP_EXPORT_TIMEOUT
+        value: "2000"
+      - name: OTEL_BSP_SCHEDULE_DELAY
+        value: "1000"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "10000"
+      - name: OTEL_METRICS_EXPORTER
+        value: none
+      - name: OTEL_LOGS_EXPORTER
+        value: none
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: deployment.environment=local
+  php:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://otel-collector-service.last9.svc.cluster.local:4318
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: http/protobuf
+      - name: OTEL_METRICS_EXPORTER
+        value: none
+      - name: OTEL_LOGS_EXPORTER
+        value: none
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: deployment.environment=local
+  # ===========================================================================
+  # OPTIONAL: Uncomment to enable (requires additional configuration)
+  # ===========================================================================
+  #
+  # NOTE: Rust does NOT support auto-instrumentation (compiled language, no runtime).
+  # Rust apps require manual SDK instrumentation at compile time.
+  # See: https://opentelemetry.io/docs/languages/rust/
+  #
+  # Go (eBPF-based) - Requires pod annotation:
+  #   instrumentation.opentelemetry.io/otel-go-auto-target-exe: "/path/to/executable"
+  # go:
+  #   env:
+  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
+  #       value: http://otel-collector-service.last9.svc.cluster.local:4318
+  #
+  # Apache HTTPD - For Apache web servers
+  # apacheHttpd:
+  #   env:
+  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
+  #       value: http://otel-collector-service.last9.svc.cluster.local:4318
+  #
+  # Nginx - For Nginx web servers
+  # nginx:
+  #   env:
+  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
+  #       value: http://otel-collector-service.last9.svc.cluster.local:4318
