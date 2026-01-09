@@ -160,6 +160,38 @@ config:
             # set(attributes["<key>"], value)
             - set(attributes["deployment.environment"], "local")
             - set(attributes["cluster.name"], "minikube")
+    # Transform processor for traces - handles service name with DD operator compatibility
+    # Priority order follows Beyla/OTel conventions for ecosystem interoperability
+    transform/traces/last9:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            # Priority 1: Last9 annotations ALWAYS win (unconditional override)
+            # Supports both last9.io/service (clean) and last9.io/service-name (legacy)
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service"])
+              where attributes["k8s.pod.annotations.last9.io/service"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.last9.io/service-name"] != nil
+            # Priority 2: OTel standard annotation (unconditional override for ecosystem compatibility)
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.resource.opentelemetry.io/service.name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.resource.opentelemetry.io/service.name"] != nil
+            # Priority 3: app.kubernetes.io/name label (standard K8s label, most Helm charts set this)
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app.kubernetes.io/name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/name"] != nil
+            # Priority 4: K8s workload owner name (Deployment > StatefulSet > DaemonSet)
+            - set(attributes["service.name"], attributes["k8s.deployment.name"])
+              where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.statefulset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.daemonset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
+            # Priority 5: app label (common fallback)
+            - set(attributes["service.name"], attributes["k8s.pod.labels.app"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.labels.app"] != nil
+            # Priority 6: Container name (final fallback)
+            - set(attributes["service.name"], attributes["k8s.container.name"])
+              where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
     memory_limiter/logs:
       # check_interval is the time between measurements of memory usage.
       check_interval: 5s
@@ -218,7 +250,9 @@ config:
         receivers:
           - otlp
         processors:
-          - batch          
+          - k8sattributes
+          - transform/traces/last9
+          - batch
         exporters:
           - otlp/last9
  

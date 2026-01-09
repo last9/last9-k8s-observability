@@ -10,6 +10,14 @@ spec:
   sampler:
     type: parentbased_traceidratio
     argument: "1.0"
+  # Defaults apply to all languages - set OTEL_SERVICE_NAME from pod label
+  # This takes precedence over DD_SERVICE and prevents DD operator conflicts
+  defaults:
+    env:
+      - name: OTEL_SERVICE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.labels['app.kubernetes.io/name']
   java:
     env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
