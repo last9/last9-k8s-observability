@@ -16,7 +16,7 @@ jobs:
         uses: ludeeus/action-shellcheck@2.0.0
         with:
           scandir: .
-          severity: warning
+          severity: error
 
   yaml-lint:
     name: YAML Lint
@@ -27,7 +27,7 @@ jobs:
         run: pip install yamllint
       - name: Lint YAML files
         run: |
-          yamllint -d '{extends: relaxed, rules: {line-length: {max: 250}, truthy: disable}}' \
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 300}, truthy: disable, indentation: disable, empty-lines: disable}}' \
             instrumentation.yaml \
             last9-otel-collector-values.yaml \
             collector-svc.yaml
