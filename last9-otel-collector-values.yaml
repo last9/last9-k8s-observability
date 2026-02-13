@@ -303,7 +303,6 @@ config:
           - batch
         exporters:
           - otlp/last9
- 
 
 # Helm currently has an issue (https://github.com/helm/helm/pull/12879) when using null to remove
 # default configuration from a subchart. The result is that you cannot remove default configuration
