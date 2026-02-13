@@ -24,18 +24,18 @@
 #    ./last9-otel-setup.sh uninstall-all
 
 # Quick Install (one-liner):
-#    curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-otel-setup.sh | bash -s -- token="your-token" endpoint="your-endpoint" monitoring-endpoint="your-metrics-endpoint" username="user" password="pass"
+#    curl -fsSL https://raw.githubusercontent.com/last9/last9-k8s-observability/main/last9-otel-setup.sh | bash -s -- token="your-token" endpoint="your-endpoint" monitoring-endpoint="your-metrics-endpoint" username="user" password="pass"
 
 set -e  # Exit on any error
 
 # Configuration defaults
 NAMESPACE="last9"
-OPERATOR_VERSION="0.92.1"
-COLLECTOR_VERSION="0.126.0"
+OPERATOR_VERSION="0.105.1"
+COLLECTOR_VERSION="0.145.0"
 MONITORING_VERSION="75.15.1"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
-DEFAULT_REPO="https://github.com/last9/l9-otel-operator.git"
+DEFAULT_REPO="https://github.com/last9/last9-k8s-observability.git"
 ORIGINAL_DIR="$(pwd)"
 
 # Initialize variables

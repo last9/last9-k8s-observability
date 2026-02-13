@@ -151,15 +151,29 @@ config:
       log_statements:
         - context: resource
           statements:
-            # service.name auto-detection for logs
+            # service.name auto-detection for logs (same priority as traces)
+            # Priority 1: Last9 annotations
             - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service"])
               where attributes["k8s.pod.annotations.last9.io/service"] != nil
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.last9.io/service-name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.last9.io/service-name"] != nil
+            # Priority 2: OTel standard annotation
+            - set(attributes["service.name"], attributes["k8s.pod.annotations.resource.opentelemetry.io/service.name"])
+              where attributes["service.name"] == nil and attributes["k8s.pod.annotations.resource.opentelemetry.io/service.name"] != nil
+            # Priority 3: app.kubernetes.io/name label
             - set(attributes["service.name"], attributes["k8s.pod.labels.app.kubernetes.io/name"])
               where attributes["service.name"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/name"] != nil
+            # Priority 4: K8s workload owner name
             - set(attributes["service.name"], attributes["k8s.deployment.name"])
               where attributes["service.name"] == nil and attributes["k8s.deployment.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.statefulset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.statefulset.name"] != nil
+            - set(attributes["service.name"], attributes["k8s.daemonset.name"])
+              where attributes["service.name"] == nil and attributes["k8s.daemonset.name"] != nil
+            # Priority 5: app label
             - set(attributes["service.name"], attributes["k8s.pod.labels.app"])
               where attributes["service.name"] == nil and attributes["k8s.pod.labels.app"] != nil
+            # Priority 6: Container name (final fallback)
             - set(attributes["service.name"], attributes["k8s.container.name"])
               where attributes["service.name"] == nil and attributes["k8s.container.name"] != nil
             #
@@ -171,7 +185,9 @@ config:
             - set(attributes["deployment.environment"], attributes["k8s.pod.labels.app.kubernetes.io/environment"])
               where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
             - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
-              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)$")
+            - set(attributes["deployment.environment"], "unknown")
+              where attributes["deployment.environment"] == nil
             #
             # cluster.name (set via setup script or manually)
             - set(attributes["cluster.name"], "minikube")
@@ -218,9 +234,12 @@ config:
             # Priority 3: app.kubernetes.io/environment label (K8s standard)
             - set(attributes["deployment.environment"], attributes["k8s.pod.labels.app.kubernetes.io/environment"])
               where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
-            # Priority 4: namespace name (common pattern: prod, staging, dev, etc.)
+            # Priority 4: namespace name — only if it matches a known environment pattern
             - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
-              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)$")
+            # Priority 5: default to "unknown" if no environment detected
+            - set(attributes["deployment.environment"], "unknown")
+              where attributes["deployment.environment"] == nil
     memory_limiter/logs:
       # check_interval is the time between measurements of memory usage.
       check_interval: 5s
@@ -308,7 +327,7 @@ image:
   repository: "otel/opentelemetry-collector-contrib"
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "0.126.0"
+  tag: "0.145.0"
   # When digest is set to a non-empty value, images will be pulled by digest (regardless of tag value).
   digest: ""
 imagePullSecrets: []

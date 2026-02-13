@@ -1,0 +1,112 @@
+name: Validate Configuration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: .
+          severity: warning
+
+  yaml-lint:
+    name: YAML Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install yamllint
+      - name: Lint YAML files
+        run: |
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 250}, truthy: disable}}' \
+            instrumentation.yaml \
+            last9-otel-collector-values.yaml \
+            collector-svc.yaml
+
+  validate-instrumentation-crd:
+    name: Validate Instrumentation CRD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | \
+            tar xzf - -C /usr/local/bin
+      - name: Validate instrumentation.yaml against CRD schema
+        run: |
+          kubeconform \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -strict \
+            -verbose \
+            instrumentation.yaml
+
+  validate-helm-template:
+    name: Validate Helm Chart Rendering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Add OTel Helm repo
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo update
+      - name: Render collector chart with values
+        run: |
+          # Replace template placeholders that the setup script normally substitutes via sed
+          sed -e 's/{{OTEL_ENDPOINT}}/test-endpoint:4317/g' \
+              -e 's/{{AUTH_TOKEN}}/test-token/g' \
+              last9-otel-collector-values.yaml > /tmp/test-values.yaml
+          helm template test-release open-telemetry/opentelemetry-collector \
+            --version 0.145.0 \
+            -f /tmp/test-values.yaml \
+            -n last9 > /tmp/rendered-collector.yaml
+          echo "Helm template rendered successfully"
+      - name: Validate rendered manifests
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | \
+            tar xzf - -C /usr/local/bin
+          kubeconform -strict -verbose /tmp/rendered-collector.yaml
+
+  validate-collector-config:
+    name: Validate Collector Config (OTTL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Add OTel Helm repo
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo update
+      - name: Extract collector config from rendered chart
+        run: |
+          sed -e 's/{{OTEL_ENDPOINT}}/test-endpoint:4317/g' \
+              -e 's/{{AUTH_TOKEN}}/test-token/g' \
+              last9-otel-collector-values.yaml > /tmp/test-values.yaml
+          helm template test-release open-telemetry/opentelemetry-collector \
+            --version 0.145.0 \
+            -f /tmp/test-values.yaml \
+            -n last9 \
+            --show-only templates/configmap-agent.yaml | \
+            yq 'select(.kind == "ConfigMap") | .data.relay' > /tmp/collector-config.yaml
+          echo "--- Extracted collector config ---"
+          head -50 /tmp/collector-config.yaml
+      - name: Validate collector config with otelcol-contrib
+        run: |
+          docker run --rm \
+            -e MY_POD_IP=127.0.0.1 \
+            -e K8S_NODE_NAME=test-node \
+            -v /tmp/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro \
+            otel/opentelemetry-collector-contrib:0.145.0 \
+            validate --config=/etc/otelcol-contrib/config.yaml
