@@ -37,6 +37,12 @@ spec:
           value: "none"
   nodejs:
     env:
+        # Override the operator's default --require injection with --import
+        # to support both ESM and CJS apps. The .mjs entry point registers
+        # the import-in-the-middle hook for ESM and falls back to --require
+        # behavior for CJS. Requires autoinstrumentation-nodejs image >= 0.57.0.
+        - name: NODE_OPTIONS
+          value: "--import /otel-auto-instrumentation-nodejs/autoinstrumentation.mjs"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector-service.last9.svc.cluster.local:4318"
         - name: OTEL_EXPORTER_OTLP_PROTOCOL
