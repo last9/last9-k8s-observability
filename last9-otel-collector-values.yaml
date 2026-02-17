@@ -185,12 +185,13 @@ config:
             - set(attributes["deployment.environment"], attributes["k8s.pod.labels.app.kubernetes.io/environment"])
               where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
             - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
-              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)$")
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)([-_].*)?$")
             - set(attributes["deployment.environment"], "unknown")
               where attributes["deployment.environment"] == nil
             #
             # cluster.name (set via setup script or manually)
-            - set(attributes["cluster.name"], "minikube")
+            # The setup script will detect this from kubectl context or cluster= parameter
+            - set(attributes["cluster.name"], "unknown-cluster")
     # Transform processor for traces - service name resolution
     # Priority order follows OTel conventions for ecosystem interoperability
     transform/traces/last9:
@@ -236,7 +237,7 @@ config:
               where attributes["deployment.environment"] == nil and attributes["k8s.pod.labels.app.kubernetes.io/environment"] != nil
             # Priority 4: namespace name — only if it matches a known environment pattern
             - set(attributes["deployment.environment"], attributes["k8s.namespace.name"])
-              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)$")
+              where attributes["deployment.environment"] == nil and attributes["k8s.namespace.name"] != nil and IsMatch(attributes["k8s.namespace.name"], "^(prod|production|staging|stage|dev|development|qa|test|uat|sandbox|preprod|pre-prod|demo|perf|load-test|integration|sit)([-_].*)?$")
             # Priority 5: default to "unknown" if no environment detected
             - set(attributes["deployment.environment"], "unknown")
               where attributes["deployment.environment"] == nil

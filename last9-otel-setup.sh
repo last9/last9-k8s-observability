@@ -962,8 +962,8 @@ show_help() {
     echo "  auto-instrument-exclude=ns1,ns2  Used with auto-instrument=all to exclude additional namespaces"
     echo "                                   (blacklist)"
     echo ""
-    echo "  All supported languages are enabled by default: Java, Python, Node.js, .NET, PHP"
-    echo "  (Go, Apache HTTPD, Nginx available but disabled - see instrumentation.yaml)"
+    echo "  All supported languages are enabled by default: Java, Python, Node.js, .NET"
+    echo "  (Go, Apache HTTPD, Nginx, PHP available but disabled - see instrumentation.yaml)"
     echo ""
     echo "  Opt-out at pod level:"
     echo "    annotations:"
@@ -1642,7 +1642,8 @@ is_system_namespace() {
 }
 
 # Function to enable auto-instrumentation for a single namespace
-# Enables ALL supported languages by default (Java, Python, Node.js, .NET, PHP)
+# Enables ALL supported languages by default (Java, Python, Node.js, .NET)
+# Note: PHP is NOT supported by the OTel Operator CRD - requires manual SDK instrumentation
 # Note: Go requires eBPF and additional annotation (OTEL_GO_AUTO_TARGET_EXE), not enabled by default
 # Note: Rust has no auto-instrumentation support, requires manual SDK instrumentation
 instrument_namespace() {
@@ -1657,29 +1658,13 @@ instrument_namespace() {
         instrumentation.opentelemetry.io/inject-python="$instrumentation_ref" \
         instrumentation.opentelemetry.io/inject-nodejs="$instrumentation_ref" \
         instrumentation.opentelemetry.io/inject-dotnet="$instrumentation_ref" \
-        instrumentation.opentelemetry.io/inject-php="$instrumentation_ref" \
         --overwrite 2>/dev/null
 
     if [ $? -eq 0 ]; then
-        log_info "  ✓ $ns: Java, Python, Node.js, .NET, PHP"
+        log_info "  ✓ $ns: Java, Python, Node.js, .NET"
     else
         log_warn "  ⚠ Failed to annotate namespace: $ns"
     fi
-}
-
-# Function to disable auto-instrumentation for a single namespace
-uninstrument_namespace() {
-    local ns="$1"
-
-    log_info "  Disabling auto-instrumentation for namespace: $ns"
-
-    kubectl annotate namespace "$ns" \
-        instrumentation.opentelemetry.io/inject-java- \
-        instrumentation.opentelemetry.io/inject-python- \
-        instrumentation.opentelemetry.io/inject-nodejs- \
-        instrumentation.opentelemetry.io/inject-dotnet- \
-        instrumentation.opentelemetry.io/inject-php- \
-        2>/dev/null || true
 }
 
 # Function to enable auto-instrumentation for namespaces
@@ -1763,6 +1748,14 @@ enable_auto_instrumentation() {
         # Whitelist mode - only instrument specified namespaces
         log_info "Mode: Instrument SPECIFIC namespaces only"
         log_info ""
+
+        # Check if exclude list was provided in whitelist mode (not supported)
+        if [ -n "$disabled_namespaces" ]; then
+            log_error "auto-instrument-exclude cannot be used with whitelist mode (auto-instrument=ns1,ns2)"
+            log_error "Either use auto-instrument=all with auto-instrument-exclude=ns1,ns2"
+            log_error "Or use whitelist mode without exclude: auto-instrument=ns1,ns2"
+            exit 1
+        fi
 
         # Split namespaces by comma
         IFS=',' read -ra NS_ARRAY <<< "$enabled_namespaces"

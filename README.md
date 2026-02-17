@@ -22,7 +22,7 @@ Setting up observability in Kubernetes typically requires:
 | Feature | Description |
 |---------|-------------|
 | **One-Command Install** | Deploy everything with a single command |
-| **Auto-Instrumentation** | Java, Python, Node.js, .NET, PHP — zero code changes |
+| **Auto-Instrumentation** | Java, Python, Node.js, .NET — zero code changes |
 | **Namespace Management** | Whitelist, blacklist, or instrument all namespaces |
 | **Smart Service Naming** | Auto-detect `service.name` from K8s labels |
 | **Environment Detection** | Auto-detect `deployment.environment` from namespace |
@@ -65,9 +65,9 @@ curl -fsSL https://raw.githubusercontent.com/last9/last9-k8s-observability/main/
 |----------|--------|-------|
 | Java | Enabled | Automatic OTLP export |
 | Python | Enabled | Automatic OTLP export |
-| Node.js | Enabled | Automatic OTLP export |
+| Node.js | Enabled (ESM + CJS) | Automatic OTLP export |
 | .NET | Enabled | Automatic OTLP export |
-| PHP | Enabled | Automatic OTLP export |
+| PHP | Not Supported | CRD doesn't support PHP, use SDK |
 | Go | Optional | eBPF-based, requires annotation |
 | Apache HTTPD | Optional | Web server instrumentation |
 | Nginx | Optional | Web server instrumentation |
@@ -102,7 +102,6 @@ metadata:
     # instrumentation.opentelemetry.io/inject-python: "last9/l9-instrumentation"
     # instrumentation.opentelemetry.io/inject-nodejs: "last9/l9-instrumentation"
     # instrumentation.opentelemetry.io/inject-dotnet: "last9/l9-instrumentation"
-    # instrumentation.opentelemetry.io/inject-php: "last9/l9-instrumentation"
 ```
 
 ## Service Name & Environment Detection
@@ -135,6 +134,12 @@ metadata:
     last9.io/service: "payment-service"
     last9.io/env: "production"
 ```
+
+**⚠️ Important:** The `last9.io/service` and `resource.opentelemetry.io/service.name` annotations **unconditionally override** any `service.name` set by your application's OpenTelemetry SDK. This is by design to allow operators to enforce consistent naming across all services, but be aware that:
+
+- If your app sets `OTEL_SERVICE_NAME=my-app` or calls `setServiceName()` in code, and a pod has `last9.io/service: "different-name"`, the annotation wins and traces will appear under `different-name`
+- This prevents conflicts with other operators (like Datadog) that may also set service names via SDK
+- To preserve SDK-set service names, do not add these annotations to your pods/namespaces
 
 ## Installation Options
 
