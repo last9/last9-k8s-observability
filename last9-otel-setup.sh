@@ -24,18 +24,18 @@
 #    ./last9-otel-setup.sh uninstall-all
 
 # Quick Install (one-liner):
-#    curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-otel-setup.sh | bash -s -- token="your-token" endpoint="your-endpoint" monitoring-endpoint="your-metrics-endpoint" username="user" password="pass"
+#    curl -fsSL https://raw.githubusercontent.com/last9/last9-k8s-observability/main/last9-otel-setup.sh | bash -s -- token="your-token" endpoint="your-endpoint" monitoring-endpoint="your-metrics-endpoint" username="user" password="pass"
 
 set -e  # Exit on any error
 
 # Configuration defaults
 NAMESPACE="last9"
-OPERATOR_VERSION="0.92.1"
-COLLECTOR_VERSION="0.126.0"
+OPERATOR_VERSION="0.105.1"
+COLLECTOR_VERSION="0.145.0"
 MONITORING_VERSION="75.15.1"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
-DEFAULT_REPO="https://github.com/last9/l9-otel-operator.git"
+DEFAULT_REPO="https://github.com/last9/last9-k8s-observability.git"
 ORIGINAL_DIR="$(pwd)"
 
 # Initialize variables
@@ -57,6 +57,8 @@ EVENTS_ONLY=false
 TOLERATIONS_FILE=""
 USE_YQ=false
 DEPLOYMENT_ENV=""
+AUTO_INSTRUMENT_NAMESPACES=""
+AUTO_INSTRUMENT_EXCLUDE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -883,6 +885,12 @@ parse_arguments() {
             env=*)
                 DEPLOYMENT_ENV="${arg#*=}"
                 ;;
+            auto-instrument=*)
+                AUTO_INSTRUMENT_NAMESPACES="${arg#*=}"
+                ;;
+            auto-instrument-exclude=*)
+                AUTO_INSTRUMENT_EXCLUDE="${arg#*=}"
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -944,6 +952,32 @@ show_help() {
     echo "  tolerations-file=FILE    Apply Kubernetes tolerations and nodeSelector from YAML file"
     echo "                           Allows running components on tainted nodes (e.g., monitoring nodes, control-plane)"
     echo "                           See examples/ directory for sample configurations"
+    echo ""
+    echo "Auto-Instrumentation Options:"
+    echo "  auto-instrument=all              Instrument ALL namespaces (except system namespaces)"
+    echo "                                   System namespaces: kube-system, kube-public, last9, cert-manager, etc."
+    echo ""
+    echo "  auto-instrument=ns1,ns2          Instrument ONLY specified namespaces (whitelist)"
+    echo ""
+    echo "  auto-instrument-exclude=ns1,ns2  Used with auto-instrument=all to exclude additional namespaces"
+    echo "                                   (blacklist)"
+    echo ""
+    echo "  All supported languages are enabled by default: Java, Python, Node.js, .NET"
+    echo "  (Go, Apache HTTPD, Nginx, PHP available but disabled - see instrumentation.yaml)"
+    echo ""
+    echo "  Opt-out at pod level:"
+    echo "    annotations:"
+    echo "      instrumentation.opentelemetry.io/inject-java: \"false\""
+    echo ""
+    echo "Examples with Auto-Instrumentation:"
+    echo "  # Instrument all namespaces (except system)"
+    echo "  $0 token=\"xxx\" endpoint=\"xxx\" auto-instrument=all"
+    echo ""
+    echo "  # Instrument all except specific namespaces"
+    echo "  $0 token=\"xxx\" endpoint=\"xxx\" auto-instrument=all auto-instrument-exclude=staging,dev"
+    echo ""
+    echo "  # Instrument only specific namespaces"
+    echo "  $0 token=\"xxx\" endpoint=\"xxx\" auto-instrument=production,backend,frontend"
     echo ""
     echo "Examples with Environment and Cluster Override:"
     echo "  # Set environment to production with cluster name"
@@ -1591,6 +1625,188 @@ create_instrumentation() {
     log_error "Failed to create instrumentation after $max_attempts attempts."
     log_info "You can try manually: kubectl apply -f instrumentation.yaml -n $NAMESPACE"
     return 1
+}
+
+# System namespaces that should never be auto-instrumented
+SYSTEM_NAMESPACES="kube-system kube-public kube-node-lease last9 cert-manager istio-system linkerd monitoring prometheus grafana argocd flux-system"
+
+# Function to check if namespace is a system namespace
+is_system_namespace() {
+    local ns="$1"
+    for sys_ns in $SYSTEM_NAMESPACES; do
+        if [ "$ns" = "$sys_ns" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to enable auto-instrumentation for a single namespace
+# Enables ALL supported languages by default (Java, Python, Node.js, .NET)
+# Note: PHP is NOT supported by the OTel Operator CRD - requires manual SDK instrumentation
+# Note: Go requires eBPF and additional annotation (OTEL_GO_AUTO_TARGET_EXE), not enabled by default
+# Note: Rust has no auto-instrumentation support, requires manual SDK instrumentation
+instrument_namespace() {
+    local ns="$1"
+    local instrumentation_ref="$NAMESPACE/l9-instrumentation"
+
+    log_info "  Enabling all languages for namespace: $ns"
+
+    # Add all language annotations in one command for efficiency
+    kubectl annotate namespace "$ns" \
+        instrumentation.opentelemetry.io/inject-java="$instrumentation_ref" \
+        instrumentation.opentelemetry.io/inject-python="$instrumentation_ref" \
+        instrumentation.opentelemetry.io/inject-nodejs="$instrumentation_ref" \
+        instrumentation.opentelemetry.io/inject-dotnet="$instrumentation_ref" \
+        --overwrite 2>/dev/null
+
+    if [ $? -eq 0 ]; then
+        log_info "  ✓ $ns: Java, Python, Node.js, .NET"
+    else
+        log_warn "  ⚠ Failed to annotate namespace: $ns"
+    fi
+}
+
+# Function to enable auto-instrumentation for namespaces
+# Supports:
+#   - Whitelist mode: auto-instrument=ns1,ns2 (only specified namespaces)
+#   - Blacklist mode: auto-instrument=all auto-instrument-exclude=ns1,ns2 (all except specified)
+#   - All mode: auto-instrument=all (instruments everything except system namespaces)
+enable_auto_instrumentation() {
+    local enabled_namespaces="$1"
+    local disabled_namespaces="$2"
+
+    # If nothing specified, skip
+    if [ -z "$enabled_namespaces" ]; then
+        log_info "No namespaces specified for auto-instrumentation."
+        log_info "To enable, use one of:"
+        log_info "  auto-instrument=all                    # All namespaces (except system)"
+        log_info "  auto-instrument=ns1,ns2                # Specific namespaces only"
+        log_info "  auto-instrument=all auto-instrument-exclude=ns1,ns2  # All except specified"
+        return 0
+    fi
+
+    log_info ""
+    log_info "═══════════════════════════════════════════════════════════════"
+    log_info "  AUTO-INSTRUMENTATION SETUP"
+    log_info "═══════════════════════════════════════════════════════════════"
+    log_info ""
+
+    # Handle "all" mode - instrument all namespaces except system + excluded
+    if [ "$enabled_namespaces" = "all" ]; then
+        log_info "Mode: Instrument ALL namespaces (except system namespaces)"
+        log_info ""
+        log_info "System namespaces (always excluded):"
+        log_info "  $SYSTEM_NAMESPACES"
+
+        if [ -n "$disabled_namespaces" ]; then
+            log_info ""
+            log_info "Additional excluded namespaces:"
+            log_info "  $disabled_namespaces"
+        fi
+
+        log_info ""
+        log_info "Discovering namespaces..."
+
+        # Get all namespaces
+        local all_namespaces
+        all_namespaces=$(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}')
+
+        # Build exclusion list
+        local exclude_list="$SYSTEM_NAMESPACES"
+        if [ -n "$disabled_namespaces" ]; then
+            # Add user-specified exclusions (comma-separated to space-separated)
+            exclude_list="$exclude_list $(echo "$disabled_namespaces" | tr ',' ' ')"
+        fi
+
+        log_info ""
+        log_info "Enabling auto-instrumentation:"
+
+        local count=0
+        for ns in $all_namespaces; do
+            # Check if namespace should be excluded
+            local skip=false
+            for exclude_ns in $exclude_list; do
+                if [ "$ns" = "$exclude_ns" ]; then
+                    skip=true
+                    break
+                fi
+            done
+
+            if [ "$skip" = true ]; then
+                continue
+            fi
+
+            instrument_namespace "$ns"
+            count=$((count + 1))
+        done
+
+        log_info ""
+        log_info "✓ Auto-instrumentation enabled for $count namespaces"
+
+    else
+        # Whitelist mode - only instrument specified namespaces
+        log_info "Mode: Instrument SPECIFIC namespaces only"
+        log_info ""
+
+        # Check if exclude list was provided in whitelist mode (not supported)
+        if [ -n "$disabled_namespaces" ]; then
+            log_error "auto-instrument-exclude cannot be used with whitelist mode (auto-instrument=ns1,ns2)"
+            log_error "Either use auto-instrument=all with auto-instrument-exclude=ns1,ns2"
+            log_error "Or use whitelist mode without exclude: auto-instrument=ns1,ns2"
+            exit 1
+        fi
+
+        # Split namespaces by comma
+        IFS=',' read -ra NS_ARRAY <<< "$enabled_namespaces"
+
+        log_info "Enabling auto-instrumentation:"
+
+        local count=0
+        for ns in "${NS_ARRAY[@]}"; do
+            # Trim whitespace
+            ns=$(echo "$ns" | xargs)
+
+            if [ -z "$ns" ]; then
+                continue
+            fi
+
+            # Skip system namespaces even if explicitly specified
+            if is_system_namespace "$ns"; then
+                log_warn "  Skipping system namespace: $ns"
+                continue
+            fi
+
+            # Check if namespace exists
+            if ! kubectl get namespace "$ns" &>/dev/null; then
+                log_warn "  Namespace '$ns' does not exist. Skipping."
+                continue
+            fi
+
+            instrument_namespace "$ns"
+            count=$((count + 1))
+        done
+
+        log_info ""
+        log_info "✓ Auto-instrumentation enabled for $count namespaces"
+    fi
+
+    log_info ""
+    log_info "───────────────────────────────────────────────────────────────"
+    log_info "  IMPORTANT NOTES"
+    log_info "───────────────────────────────────────────────────────────────"
+    log_info ""
+    log_info "• NEW pods will be automatically instrumented"
+    log_info "• EXISTING pods need restart: kubectl rollout restart deployment -n <ns>"
+    log_info ""
+    log_info "To OPT-OUT a specific pod, add annotation:"
+    log_info "  instrumentation.opentelemetry.io/inject-java: \"false\""
+    log_info "  instrumentation.opentelemetry.io/inject-python: \"false\""
+    log_info "  (repeat for each language)"
+    log_info ""
+    log_info "To OPT-OUT an entire namespace later:"
+    log_info "  kubectl annotate namespace <ns> instrumentation.opentelemetry.io/inject-java-"
+    log_info ""
 }
 
 # Function to verify installation
@@ -2462,8 +2678,9 @@ main() {
         install_collector
         create_collector_service
         create_instrumentation
+        enable_auto_instrumentation "$AUTO_INSTRUMENT_NAMESPACES" "$AUTO_INSTRUMENT_EXCLUDE"
         verify_installation
-        
+
         cleanup
         
         log_info "🎉 OpenTelemetry Operator and Collector installation completed successfully!"
@@ -2493,8 +2710,9 @@ main() {
         install_collector
         create_collector_service
         create_instrumentation
+        enable_auto_instrumentation "$AUTO_INSTRUMENT_NAMESPACES" "$AUTO_INSTRUMENT_EXCLUDE"
         verify_installation
-        
+
         # Install monitoring stack if requested
         if [ "$SETUP_MONITORING" = true ]; then
             log_info "Installing Last9 monitoring stack..."
