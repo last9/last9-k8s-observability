@@ -10,11 +10,6 @@ spec:
   sampler:
     type: parentbased_traceidratio
     argument: "1.0"
-  # Auto-map standard K8s labels to OTel resource attributes:
-  #   app.kubernetes.io/name    → service.name
-  #   app.kubernetes.io/version → service.version
-  defaults:
-    useLabelsForResourceAttributes: true
   java:
     env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -35,14 +30,10 @@ spec:
           value: "none"
         - name: OTEL_LOGS_EXPORTER
           value: "none"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "deployment.environment=local"
   nodejs:
     env:
-        # Override the operator's default --require injection with --import
-        # to support both ESM and CJS apps. The .mjs entry point registers
-        # the import-in-the-middle hook for ESM and falls back to --require
-        # behavior for CJS. Requires autoinstrumentation-nodejs image >= 0.57.0.
-        - name: NODE_OPTIONS
-          value: "--import /otel-auto-instrumentation-nodejs/autoinstrumentation.mjs"
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector-service.last9.svc.cluster.local:4318"
         - name: OTEL_EXPORTER_OTLP_PROTOCOL
@@ -61,6 +52,8 @@ spec:
           value: "none"
         - name: OTEL_LOGS_EXPORTER
           value: "none"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "deployment.environment=local"
   python:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -79,52 +72,7 @@ spec:
         value: "10"
       - name: OTEL_LOGS_EXPORTER
         value: none
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: deployment.environment=local
       - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
         value: system-metrics
-  dotnet:
-    env:
-      - name: OTEL_EXPORTER_OTLP_ENDPOINT
-        value: http://otel-collector-service.last9.svc.cluster.local:4318
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: http/protobuf
-      - name: OTEL_BSP_MAX_EXPORT_BATCH_SIZE
-        value: "512"
-      - name: OTEL_BSP_EXPORT_TIMEOUT
-        value: "2000"
-      - name: OTEL_BSP_SCHEDULE_DELAY
-        value: "1000"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "10000"
-      - name: OTEL_METRICS_EXPORTER
-        value: none
-      - name: OTEL_LOGS_EXPORTER
-        value: none
-  # NOTE: PHP is NOT supported by the OTel Operator Instrumentation CRD.
-  # PHP apps require manual SDK instrumentation.
-  # See: https://opentelemetry.io/docs/languages/php/
-  # ===========================================================================
-  # OPTIONAL: Uncomment to enable (requires additional configuration)
-  # ===========================================================================
-  #
-  # NOTE: Rust does NOT support auto-instrumentation (compiled language, no runtime).
-  # Rust apps require manual SDK instrumentation at compile time.
-  # See: https://opentelemetry.io/docs/languages/rust/
-  #
-  # Go (eBPF-based) - Requires pod annotation:
-  #   instrumentation.opentelemetry.io/otel-go-auto-target-exe: "/path/to/executable"
-  # go:
-  #   env:
-  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
-  #       value: http://otel-collector-service.last9.svc.cluster.local:4318
-  #
-  # Apache HTTPD - For Apache web servers
-  # apacheHttpd:
-  #   env:
-  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
-  #       value: http://otel-collector-service.last9.svc.cluster.local:4318
-  #
-  # Nginx - For Nginx web servers
-  # nginx:
-  #   env:
-  #     - name: OTEL_EXPORTER_OTLP_ENDPOINT
-  #       value: http://otel-collector-service.last9.svc.cluster.local:4318

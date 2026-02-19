@@ -1,41 +1,28 @@
-# Last9 Kubernetes Observability
+# Last9 OpenTelemetry Operator Setup
 
-One-command OpenTelemetry setup for Kubernetes with automatic instrumentation, service discovery, and Last9 integration.
-
-[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-supported-blueviolet)](https://opentelemetry.io/)
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.24+-blue)](https://kubernetes.io/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-
-## Why This Exists
-
-Setting up observability in Kubernetes typically requires:
-- Installing and configuring the OTel Operator
-- Deploying and tuning collectors
-- Creating instrumentation resources
-- Manually annotating every namespace
-- Configuring service names and environments
-
-**This project reduces all of that to a single command.**
+Automated setup script for deploying OpenTelemetry Operator, Collector, Kubernetes monitoring, and Events collection to your Kubernetes cluster with Last9 integration.
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **One-Command Install** | Deploy everything with a single command |
-| **Auto-Instrumentation** | Java, Python, Node.js, .NET — zero code changes |
-| **Namespace Management** | Whitelist, blacklist, or instrument all namespaces |
-| **Smart Service Naming** | Auto-detect `service.name` from K8s labels |
-| **Environment Detection** | Auto-detect `deployment.environment` from namespace |
-| **Full Stack** | Traces, logs, metrics, and K8s events |
+- ✅ **One-command installation** - Deploy everything with a single command
+- ✅ **Flexible deployment options** - Install only what you need (logs, traces, metrics, events)
+- ✅ **Auto-instrumentation** - Automatic instrumentation for Java, Python, Node.js, and more
+- ✅ **Kubernetes monitoring** - Full cluster observability with kube-prometheus-stack
+- ✅ **Events collection** - Capture and forward Kubernetes events
+- ✅ **Cluster identification** - Automatic cluster name detection and attribution
+- ✅ **Tolerations support** - Deploy on tainted nodes (control-plane, spot instances, etc.)
+- ✅ **Environment customization** - Override deployment environment and cluster name
 
 ## Quick Start
 
 ### Prerequisites
 
-- `kubectl` configured with cluster access
-- `helm` v3+
+- `kubectl` configured to access your Kubernetes cluster
+- `helm` (v3+) installed
 
-### Install Everything
+### Option 1: Install Everything (Recommended)
+
+Installs OpenTelemetry Operator, Collector, Kubernetes monitoring stack, and Events agent:
 
 ```bash
 ./last9-otel-setup.sh \
@@ -46,10 +33,10 @@ Setting up observability in Kubernetes typically requires:
   password="<your-password>"
 ```
 
-### One-Liner Install
+### Quick Install (One-liner)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/last9/last9-k8s-observability/main/last9-otel-setup.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-otel-setup.sh | bash -s -- \
   token="Basic <your-token>" \
   endpoint="<your-otlp-endpoint>" \
   monitoring-endpoint="<your-metrics-endpoint>" \
@@ -57,93 +44,11 @@ curl -fsSL https://raw.githubusercontent.com/last9/last9-k8s-observability/main/
   password="<pass>"
 ```
 
-## Auto-Instrumentation
-
-### Supported Languages
-
-| Language | Status | Notes |
-|----------|--------|-------|
-| Java | Enabled | Automatic OTLP export |
-| Python | Enabled | Automatic OTLP export |
-| Node.js | Enabled (ESM + CJS) | Automatic OTLP export |
-| .NET | Enabled | Automatic OTLP export |
-| PHP | Not Supported | CRD doesn't support PHP, use SDK |
-| Go | Optional | eBPF-based, requires annotation |
-| Apache HTTPD | Optional | Web server instrumentation |
-| Nginx | Optional | Web server instrumentation |
-| Rust | Not Supported | Compiled language, use SDK |
-
-### Namespace-Level Instrumentation
-
-Instrument namespaces without modifying deployments:
-
-```bash
-# Instrument ALL namespaces (excludes system namespaces)
-./last9-otel-setup.sh auto-instrument=all token="..." endpoint="..."
-
-# Whitelist specific namespaces
-./last9-otel-setup.sh auto-instrument=app1,app2,app3 token="..." endpoint="..."
-
-# Exclude specific namespaces
-./last9-otel-setup.sh auto-instrument-exclude=staging,dev token="..." endpoint="..."
-```
-
-**System namespaces are always excluded:** `kube-system`, `kube-public`, `kube-node-lease`, `cert-manager`, `istio-system`, `linkerd`, `monitoring`, `prometheus`, `grafana`, `argocd`, `flux-system`, `last9`
-
-### Per-Deployment Instrumentation
-
-Add annotation to your deployment:
-
-```yaml
-metadata:
-  annotations:
-    instrumentation.opentelemetry.io/inject-java: "last9/l9-instrumentation"
-    # Or for other languages:
-    # instrumentation.opentelemetry.io/inject-python: "last9/l9-instrumentation"
-    # instrumentation.opentelemetry.io/inject-nodejs: "last9/l9-instrumentation"
-    # instrumentation.opentelemetry.io/inject-dotnet: "last9/l9-instrumentation"
-```
-
-## Service Name & Environment Detection
-
-### Automatic Detection
-
-The collector automatically resolves `service.name` and `deployment.environment` from Kubernetes metadata:
-
-**service.name priority:**
-1. `last9.io/service` annotation
-2. `app.kubernetes.io/name` label
-3. `app.kubernetes.io/component` label
-4. Deployment name
-5. `app` label
-6. Container name
-
-**deployment.environment priority:**
-1. `last9.io/env` annotation
-2. `environment` label
-3. `app.kubernetes.io/environment` label
-4. Namespace name
-
-### Explicit Override
-
-Override via annotations when needed:
-
-```yaml
-metadata:
-  annotations:
-    last9.io/service: "payment-service"
-    last9.io/env: "production"
-```
-
-**⚠️ Important:** The `last9.io/service` and `resource.opentelemetry.io/service.name` annotations **unconditionally override** any `service.name` set by your application's OpenTelemetry SDK. This is by design to allow operators to enforce consistent naming across all services, but be aware that:
-
-- If your app sets `OTEL_SERVICE_NAME=my-app` or calls `setServiceName()` in code, and a pod has `last9.io/service: "different-name"`, the annotation wins and traces will appear under `different-name`
-- This prevents conflicts with other operators (like Datadog) that may also set service names via SDK
-- To preserve SDK-set service names, do not add these annotations to your pods/namespaces
-
 ## Installation Options
 
-### Traces Only
+### Option 2: Traces Only (Operator + Collector)
+
+For applications that need distributed tracing:
 
 ```bash
 ./last9-otel-setup.sh operator-only \
@@ -151,7 +56,9 @@ metadata:
   endpoint="<your-otlp-endpoint>"
 ```
 
-### Logs Only
+### Option 3: Logs Only (Collector without Operator)
+
+For log collection use cases:
 
 ```bash
 ./last9-otel-setup.sh logs-only \
@@ -159,7 +66,9 @@ metadata:
   endpoint="<your-otlp-endpoint>"
 ```
 
-### Metrics Only
+### Option 4: Metrics Only (Kubernetes Monitoring)
+
+For cluster metrics and monitoring:
 
 ```bash
 ./last9-otel-setup.sh monitoring-only \
@@ -168,164 +77,226 @@ metadata:
   password="<your-password>"
 ```
 
-### Events Only
+### Option 5: Kubernetes Events Only
+
+For Kubernetes events collection:
 
 ```bash
 ./last9-otel-setup.sh events-only \
   endpoint="<your-otlp-endpoint>" \
-  token="Basic <your-token>" \
+  token="Basic <your-base64-token>" \
   monitoring-endpoint="<your-metrics-endpoint>"
 ```
 
-## Configuration
+## Advanced Configuration
 
 ### Override Cluster Name
 
 ```bash
-./last9-otel-setup.sh cluster="prod-us-east-1" token="..." endpoint="..."
+./last9-otel-setup.sh \
+  token="..." \
+  endpoint="..." \
+  cluster="prod-us-east-1"
 ```
 
-Auto-detected from `kubectl config current-context` if not provided.
+If not provided, the cluster name is auto-detected from `kubectl config current-context`.
 
-### Set Environment
+### Set Deployment Environment
 
 ```bash
-./last9-otel-setup.sh env="production" token="..." endpoint="..."
+./last9-otel-setup.sh \
+  token="..." \
+  endpoint="..." \
+  env="production"
 ```
 
-### Tolerations
+Default: `staging` for collector, `local` for auto-instrumentation.
 
-Deploy on tainted nodes:
+### Deploy with Tolerations
+
+For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
 
 ```bash
-./last9-otel-setup.sh tolerations-file=/path/to/tolerations.yaml token="..." endpoint="..."
+./last9-otel-setup.sh \
+  token="..." \
+  endpoint="..." \
+  tolerations-file=/path/to/tolerations.yaml
 ```
 
-Example files in `examples/`:
-- `tolerations-all-nodes.yaml`
-- `tolerations-monitoring-nodes.yaml`
-- `tolerations-spot-instances.yaml`
+**Example tolerations files** are provided in the `examples/` directory:
+- `tolerations-all-nodes.yaml` - Deploy on all nodes including control-plane
+- `tolerations-monitoring-nodes.yaml` - Deploy on dedicated monitoring nodes
+- `tolerations-spot-instances.yaml` - Deploy on spot/preemptible instances
+- `tolerations-multi-taint.yaml` - Handle multiple taints
+- `tolerations-nodeSelector-only.yaml` - Use nodeSelector without tolerations
 
-## Application Metrics Scraping
+## Configuration Files
 
-Enable Prometheus-style metrics scraping with annotations:
+| File | Description |
+|------|-------------|
+| `last9-otel-collector-values.yaml` | OpenTelemetry Collector configuration for logs and traces |
+| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for metrics |
+| `last9-kube-events-agent-values.yaml` | Events collection agent configuration |
+| `collector-svc.yaml` | Collector service for application instrumentation |
+| `instrumentation.yaml` | Auto-instrumentation configuration |
+| `deploy.yaml` | Sample application deployment with auto-instrumentation |
+| `tolerations.yaml` | Sample tolerations configuration |
 
-```yaml
-metadata:
-  annotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "8080"
-    prometheus.io/path: "/metrics"  # Optional, defaults to /metrics
-```
+### Placeholders
 
-Deploy with metrics configuration:
+The following placeholders are automatically replaced during installation:
+
+- `{{AUTH_TOKEN}}` - Your Last9 authorization token
+- `{{OTEL_ENDPOINT}}` - Your OTEL endpoint URL
+- `{{MONITORING_ENDPOINT}}` - Your metrics endpoint URL
+
+## Uninstallation
+
+### Uninstall Everything
 
 ```bash
-helm upgrade last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
-  --namespace last9 \
-  --values last9-otel-collector-values.yaml \
-  --values last9-otel-collector-metrics-values.yaml
+./last9-otel-setup.sh uninstall-all
+```
+
+### Uninstall Specific Components
+
+```bash
+# Uninstall only monitoring stack
+./last9-otel-setup.sh uninstall function="uninstall_last9_monitoring"
+
+# Uninstall only events agent
+./last9-otel-setup.sh uninstall function="uninstall_events_agent"
+
+# Uninstall OpenTelemetry components (operator + collector)
+./last9-otel-setup.sh uninstall
 ```
 
 ## Verification
 
+After installation, verify the deployment:
+
 ```bash
-# Check all components
+# Check all pods in last9 namespace
 kubectl get pods -n last9
 
 # Check collector logs
 kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-collector
 
-# Check instrumentation
-kubectl get instrumentation -n last9
+# Check monitoring stack
+kubectl get prometheus -n last9
 
-# Verify auto-instrumented namespaces
-kubectl get ns -o json | jq '.items[] | select(.metadata.annotations["instrumentation.opentelemetry.io/inject-java"] != null) | .metadata.name'
+# Check events agent
+kubectl get pods -n last9 -l app.kubernetes.io/name=last9-kube-events-agent
 ```
 
-## Uninstallation
+## Auto-Instrumentation
+
+The script automatically sets up instrumentation for:
+
+- ☕ **Java** - Automatic OTLP export
+- 🐍 **Python** - Automatic OTLP export
+- 🟢 **Node.js** - Automatic OTLP export
+- 🔵 **Go** - Manual instrumentation supported
+- 💎 **Ruby** - Coming soon
+
+## Application Metrics Scraping (Optional)
+
+The OpenTelemetry Collector can automatically discover and scrape application metrics using Kubernetes service discovery with Prometheus-compatible scraping.
+
+**Note:** This is an optional feature. Use `last9-otel-collector-metrics-values.yaml` to enable metrics scraping.
+
+### Enable Metrics Scraping
+
+To enable application metrics scraping, deploy with the additional metrics configuration file:
 
 ```bash
-# Uninstall everything
-./last9-otel-setup.sh uninstall-all
-
-# Uninstall specific components
-./last9-otel-setup.sh uninstall                                    # OTel components
-./last9-otel-setup.sh uninstall function="uninstall_last9_monitoring"  # Monitoring
-./last9-otel-setup.sh uninstall function="uninstall_events_agent"      # Events
+# Deploy with metrics scraping enabled
+helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+  --namespace last9 \
+  --values last9-otel-collector-values.yaml \
+  --values last9-otel-collector-metrics-values.yaml
 ```
 
-## Configuration Files
+**Configure Last9 Metrics Endpoint:**
 
-| File | Purpose |
-|------|---------|
-| `last9-otel-collector-values.yaml` | Collector config (logs, traces) |
-| `last9-otel-collector-metrics-values.yaml` | Optional metrics scraping |
-| `k8s-monitoring-values.yaml` | Kube-prometheus-stack config |
-| `last9-kube-events-agent-values.yaml` | K8s events agent |
-| `instrumentation.yaml` | Auto-instrumentation config |
-| `collector-svc.yaml` | Collector service |
+Before deploying, update these placeholders in `last9-otel-collector-metrics-values.yaml`:
+- `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 Prometheus remote write URL
+- `{{LAST9_METRICS_USERNAME}}` - Your Last9 metrics username
+- `{{LAST9_METRICS_PASSWORD}}` - Your Last9 metrics password
 
-## Troubleshooting
+### Quick Start
 
-### Pods not instrumented
+Add these annotations to your pod template or service to enable automatic metrics scraping:
 
-1. Check namespace has instrumentation annotation:
-   ```bash
-   kubectl get ns <namespace> -o yaml | grep instrumentation
-   ```
-
-2. Verify instrumentation resource exists:
-   ```bash
-   kubectl get instrumentation -n last9
-   ```
-
-3. Check operator logs:
-   ```bash
-   kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-operator
-   ```
-
-### Service name not detected
-
-1. Ensure pods have `app.kubernetes.io/name` label
-2. Or add explicit annotation: `last9.io/service: "my-service"`
-
-### Traces not appearing
-
-1. Check collector is receiving data:
-   ```bash
-   kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-collector | grep "TracesExporter"
-   ```
-
-2. Verify endpoint connectivity:
-   ```bash
-   kubectl exec -n last9 -it <collector-pod> -- wget -q -O- <endpoint>/health
-   ```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Your Application                          │
-│  (Auto-instrumented via OTel Operator MutatingWebhook)          │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ OTLP (traces)
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    OTel Collector (DaemonSet)                    │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  Receivers  │→ │ Processors  │→ │       Exporters         │  │
-│  │  - OTLP     │  │ - Transform │  │ - OTLP/HTTP (Last9)     │  │
-│  │  - Filelog  │  │ - Batch     │  │                         │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │    Last9    │
-                    └─────────────┘
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"  # Optional, defaults to /metrics
 ```
 
-## License
+That's it! Your application metrics will be automatically:
+- **Discovered** - No manual configuration needed
+- **Scraped** - Every 30 seconds by default
+- **Enriched** - With pod, namespace, node labels
+- **Exported** - To Last9 via Prometheus remote write
 
-Apache 2.0
+### How It Works
+
+1. **Automatic Discovery** - OTel Collector watches Kubernetes API for all pods/services
+2. **Annotation-Based Filtering** - Only scrapes resources with `prometheus.io/scrape: "true"`
+3. **Metadata Enrichment** - Adds Kubernetes labels automatically (pod, namespace, node, app)
+4. **Direct Export** - Sends metrics to Last9 Prometheus endpoint
+
+### Supported Annotations
+
+| Annotation | Required | Default | Description |
+|------------|----------|---------|-------------|
+| `prometheus.io/scrape` | Yes | - | Set to "true" to enable scraping |
+| `prometheus.io/port` | Yes | - | Port number exposing /metrics |
+| `prometheus.io/path` | No | /metrics | HTTP path for metrics endpoint |
+
+### Scaling
+
+This setup scales automatically:
+- **1 service** → Automatically scraped
+- **1000 services** → Automatically scraped
+- **No configuration changes needed** when adding new services
+
+### Configuration Files
+
+**Base Configuration:** `last9-otel-collector-values.yaml`
+- Traces and logs collection
+- Basic OTLP receiver
+- No metrics scraping
+
+**Optional Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
+- **Prometheus receiver** with kubernetes_sd_configs for auto-discovery
+- **prometheusremotewrite exporter** for sending to Last9
+- **RBAC** for Kubernetes API access
+- **Increased resource limits** for collector pods
+- **BasicAuth extension** for Last9 metrics endpoint
+
+To use both: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
+
+### Verification
+
+Check if metrics are being scraped:
+
+```bash
+# Check collector logs for scraping
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep kubernetes-pods
+
+# Port-forward to collector metrics endpoint
+kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
+
+# Check scrape status
+curl http://localhost:8888/metrics | grep scrape_samples_scraped
+```
