@@ -136,6 +136,8 @@ For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
 | File | Description |
 |------|-------------|
 | `last9-otel-collector-values.yaml` | OpenTelemetry Collector configuration for logs and traces |
+| `last9-otel-collector-metrics-values.yaml` | Optional: Application metrics scraping (Prometheus SD) |
+| `last9-otel-collector-gpu-values.yaml` | Optional: GPU (DCGM) + Ray metrics scraping (includes app metrics) |
 | `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for metrics |
 | `last9-kube-events-agent-values.yaml` | Events collection agent configuration |
 | `collector-svc.yaml` | Collector service for application instrumentation |
@@ -278,14 +280,22 @@ This setup scales automatically:
 - Basic OTLP receiver
 - No metrics scraping
 
-**Optional Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
+**App Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
 - **Prometheus receiver** with kubernetes_sd_configs for auto-discovery
 - **prometheusremotewrite exporter** for sending to Last9
 - **RBAC** for Kubernetes API access
 - **Increased resource limits** for collector pods
 - **BasicAuth extension** for Last9 metrics endpoint
 
-To use both: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
+**GPU + App Metrics Configuration:** `last9-otel-collector-gpu-values.yaml`
+- Everything in the app metrics configuration, plus:
+- **DCGM GPU metrics** scraping (NVIDIA GPU Operator)
+- **Ray head/worker metrics** scraping (KubeRay Operator)
+- **Cardinality control** via metric keep-list for DCGM
+
+Choose ONE metrics overlay:
+- App metrics only: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
+- App + GPU metrics: `--values last9-otel-collector-values.yaml --values last9-otel-collector-gpu-values.yaml`
 
 ### Verification
 
@@ -304,13 +314,23 @@ curl http://localhost:8888/metrics | grep scrape_samples_scraped
 
 ## GPU Metrics (DCGM) & Ray Metrics Scraping
 
-The metrics configuration includes built-in scrape jobs for **NVIDIA DCGM GPU metrics** and **Ray (KubeRay) application metrics**. These jobs use label-based discovery — no annotation changes needed on DCGM or Ray pods.
+GPU and Ray metrics collection is **opt-in**. Use `last9-otel-collector-gpu-values.yaml` instead of the base metrics file to enable these scrape jobs. They use label-based discovery — no annotation changes needed on DCGM or Ray pods.
+
+### Enable GPU Metrics
+
+```bash
+helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+  --namespace last9 \
+  --values last9-otel-collector-values.yaml \
+  --values last9-otel-collector-gpu-values.yaml
+```
+
+> **Note:** Use `last9-otel-collector-gpu-values.yaml` **instead of** `last9-otel-collector-metrics-values.yaml` — the GPU file already includes all application metrics scrape jobs.
 
 ### Prerequisites
 
 - **DCGM metrics**: [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
 - **Ray metrics**: [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) installed (Ray pods carry `ray.io/node-type` and `ray.io/cluster` labels)
-- Metrics scraping enabled via `last9-otel-collector-metrics-values.yaml`
 
 ### Scrape Jobs
 
