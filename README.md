@@ -129,6 +129,7 @@ For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
 - `tolerations-spot-instances.yaml` - Deploy on spot/preemptible instances
 - `tolerations-multi-taint.yaml` - Handle multiple taints
 - `tolerations-nodeSelector-only.yaml` - Use nodeSelector without tolerations
+- `tolerations-gpu-nodes.yaml` - Deploy on GPU nodes with `nvidia.com/gpu` taints
 
 ## Configuration Files
 
@@ -299,4 +300,81 @@ kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
 
 # Check scrape status
 curl http://localhost:8888/metrics | grep scrape_samples_scraped
+```
+
+## GPU Metrics (DCGM) & Ray Metrics Scraping
+
+The metrics configuration includes built-in scrape jobs for **NVIDIA DCGM GPU metrics** and **Ray (KubeRay) application metrics**. These jobs use label-based discovery — no annotation changes needed on DCGM or Ray pods.
+
+### Prerequisites
+
+- **DCGM metrics**: [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
+- **Ray metrics**: [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) installed (Ray pods carry `ray.io/node-type` and `ray.io/cluster` labels)
+- Metrics scraping enabled via `last9-otel-collector-metrics-values.yaml`
+
+### Scrape Jobs
+
+| Job | Target | Label Selector | Port | Interval |
+|-----|--------|----------------|------|----------|
+| `dcgm-gpu-metrics` | DCGM Exporter pods | `app.kubernetes.io/name=nvidia-dcgm-exporter` | 9400 | 15s |
+| `ray-head` | Ray head nodes | `ray.io/node-type=head` | 8080 | 30s |
+| `ray-workers` | Ray worker nodes | `ray.io/node-type=worker` | 8080 | 30s |
+
+### DCGM Metrics Collected
+
+The DCGM job includes a cardinality keep-list limiting collection to 18 key metrics:
+
+- **Utilization**: `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_MEM_COPY_UTIL`, `DCGM_FI_DEV_ENC_UTIL`, `DCGM_FI_DEV_DEC_UTIL`
+- **Memory**: `DCGM_FI_DEV_FB_FREE`, `DCGM_FI_DEV_FB_USED`, `DCGM_FI_DEV_FB_TOTAL`
+- **Temperature & Power**: `DCGM_FI_DEV_GPU_TEMP`, `DCGM_FI_DEV_MEMORY_TEMP`, `DCGM_FI_DEV_POWER_USAGE`
+- **Errors**: `DCGM_FI_DEV_XID_ERRORS`, `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`, `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
+- **PCIe**: `DCGM_FI_DEV_PCIE_TX_THROUGHPUT`, `DCGM_FI_DEV_PCIE_RX_THROUGHPUT`
+- **Clock & Performance**: `DCGM_FI_DEV_SM_CLOCK`, `DCGM_FI_DEV_MEM_CLOCK`, `DCGM_FI_DEV_PSTATE`
+
+To add more DCGM metrics, extend the `metric_relabel_configs` regex in `last9-otel-collector-metrics-values.yaml`.
+
+### GPU Node Tolerations
+
+If your GPU nodes have `nvidia.com/gpu` taints, the OTel Collector and node exporter need tolerations to schedule on those nodes:
+
+```bash
+./last9-otel-setup.sh \
+  token="..." \
+  endpoint="..." \
+  monitoring-endpoint="..." \
+  username="..." \
+  password="..." \
+  tolerations-file=examples/tolerations-gpu-nodes.yaml
+```
+
+See `examples/tolerations-gpu-nodes.yaml` for the toleration configuration.
+
+### Resource Scaling for Large GPU Fleets
+
+For clusters with many GPU nodes, the collector handles additional scrape targets. Suggested resource scaling:
+
+| GPU Nodes | CPU Request/Limit | Memory Request/Limit |
+|-----------|-------------------|----------------------|
+| 1-10 | 250m / 500m | 512Mi / 1Gi |
+| 10-50 | 500m / 1000m | 1Gi / 2Gi |
+| 50-100 | 1000m / 2000m | 2Gi / 4Gi |
+
+Override resources in your Helm values or pass a custom values file.
+
+### GPU & Ray Verification
+
+```bash
+# Verify DCGM exporter pods are discovered
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep dcgm-gpu-metrics
+
+# Verify Ray head/worker pods are discovered
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep ray-head
+kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep ray-workers
+
+# Check DCGM metrics are being scraped
+kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
+curl -s http://localhost:8888/metrics | grep -c "DCGM_FI_DEV"
+
+# Check Ray metrics are being scraped
+curl -s http://localhost:8888/metrics | grep scrape_samples_scraped | grep ray
 ```
