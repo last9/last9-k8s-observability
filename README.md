@@ -351,7 +351,7 @@ The DCGM job includes a cardinality keep-list limiting collection to 18 key metr
 - **PCIe**: `DCGM_FI_DEV_PCIE_TX_THROUGHPUT`, `DCGM_FI_DEV_PCIE_RX_THROUGHPUT`
 - **Clock & Performance**: `DCGM_FI_DEV_SM_CLOCK`, `DCGM_FI_DEV_MEM_CLOCK`, `DCGM_FI_DEV_PSTATE`
 
-To add more DCGM metrics, extend the `metric_relabel_configs` regex in `last9-otel-collector-metrics-values.yaml`.
+To add more DCGM metrics, extend the `metric_relabel_configs` regex in `last9-otel-collector-gpu-values.yaml`.
 
 ### GPU Node Tolerations
 
