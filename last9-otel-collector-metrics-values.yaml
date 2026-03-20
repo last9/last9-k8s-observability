@@ -1,6 +1,8 @@
 # Optional metrics scraping configuration for OpenTelemetry Collector
-# This file adds automatic metrics scraping capabilities via Prometheus receiver
+# This file adds automatic application metrics scraping via Prometheus receiver
 # Use this file with: helm upgrade ... --values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml
+#
+# For GPU metrics (DCGM) and Ray metrics, use last9-otel-collector-gpu-values.yaml instead
 
 # Enable ClusterRole for Kubernetes service discovery
 clusterRole:

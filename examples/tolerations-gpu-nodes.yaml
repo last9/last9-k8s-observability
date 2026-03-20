@@ -1,0 +1,20 @@
+# Tolerations for GPU nodes with NVIDIA taints
+# Use this when your GPU nodes have nvidia.com/gpu taints (common with GKE, EKS GPU node pools)
+#
+# Usage:
+#   ./last9-otel-setup.sh \
+#     token="..." endpoint="..." \
+#     tolerations-file=examples/tolerations-gpu-nodes.yaml
+
+# Collector tolerations — allows OTel Collector pods to schedule on GPU nodes
+tolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+# Node exporter tolerations — ensures node-level metrics from GPU nodes
+# Required for kube-prometheus-stack node exporter to cover GPU nodes
+nodeExporterTolerations:
+  - key: "nvidia.com/gpu"
+    operator: "Exists"
+    effect: "NoSchedule"
