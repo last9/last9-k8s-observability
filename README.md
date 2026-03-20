@@ -214,7 +214,8 @@ To enable application metrics scraping, deploy with the additional metrics confi
 
 ```bash
 # Deploy with metrics scraping enabled
-helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+  --version 0.125.0 \
   --namespace last9 \
   --values last9-otel-collector-values.yaml \
   --values last9-otel-collector-metrics-values.yaml
@@ -319,7 +320,8 @@ GPU and Ray metrics collection is **opt-in**. Use `last9-otel-collector-gpu-valu
 ### Enable GPU Metrics
 
 ```bash
-helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+  --version 0.125.0 \
   --namespace last9 \
   --values last9-otel-collector-values.yaml \
   --values last9-otel-collector-gpu-values.yaml
@@ -329,14 +331,39 @@ helm upgrade last9-opentelemetry-collector opentelemetry-collector \
 
 ### Prerequisites
 
-- **DCGM metrics**: [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
 - **Ray metrics**: [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) installed (Ray pods carry `ray.io/node-type` and `ray.io/cluster` labels)
+- **DCGM metrics** (platform-specific):
+
+| Platform | DCGM Exporter | Setup Required |
+|----------|--------------|----------------|
+| **GKE** | Managed by GKE in `gke-managed-system` namespace | None — auto-deployed with GPU node pools |
+| **EKS / self-managed** | [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) | Install GPU Operator, then update the `dcgm-gpu-metrics` job in the values file (see below) |
+
+#### Adapting for EKS / Self-Managed Clusters
+
+The default GPU values file is configured for GKE. For EKS or self-managed clusters with the NVIDIA GPU Operator, update the `dcgm-gpu-metrics` scrape job in `last9-otel-collector-gpu-values.yaml`:
+
+1. **Remove** the `namespaces` filter (or change to your DCGM exporter namespace)
+2. **Change** the label regex from `gke-managed-dcgm-exporter` to `nvidia-dcgm-exporter`
+
+```yaml
+# EKS / self-managed example
+- job_name: 'dcgm-gpu-metrics'
+  kubernetes_sd_configs:
+    - role: pod
+    # No namespace filter — discovers across all namespaces
+  relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+      action: keep
+      regex: nvidia-dcgm-exporter
+    # ... rest of config unchanged
+```
 
 ### Scrape Jobs
 
-| Job | Target | Label Selector | Port | Interval |
-|-----|--------|----------------|------|----------|
-| `dcgm-gpu-metrics` | DCGM Exporter pods | `app.kubernetes.io/name=nvidia-dcgm-exporter` | 9400 | 15s |
+| Job | Target | Discovery | Port | Interval |
+|-----|--------|-----------|------|----------|
+| `dcgm-gpu-metrics` | DCGM Exporter pods | GKE: `gke-managed-dcgm-exporter` in `gke-managed-system` / EKS: `nvidia-dcgm-exporter` | 9400 | 15s |
 | `ray-head` | Ray head nodes | `ray.io/node-type=head` | 8080 | 30s |
 | `ray-workers` | Ray worker nodes | `ray.io/node-type=worker` | 8080 | 30s |
 

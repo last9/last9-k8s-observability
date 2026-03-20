@@ -4,15 +4,21 @@
 # This file extends the base metrics configuration with GPU-specific scrape jobs.
 # Use INSTEAD OF last9-otel-collector-metrics-values.yaml (not alongside it):
 #
-#   helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+#   helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+#     --version 0.125.0 \
 #     --namespace last9 \
 #     --values last9-otel-collector-values.yaml \
 #     --values last9-otel-collector-gpu-values.yaml
 #
 # Prerequisites:
-#   - NVIDIA GPU Operator installed (for DCGM metrics)
 #   - KubeRay Operator installed (for Ray metrics)
 #   - GPU node tolerations if nodes are tainted (see examples/tolerations-gpu-nodes.yaml)
+#
+# DCGM metrics:
+#   - On GKE: DCGM exporter is managed by GKE in the gke-managed-system namespace
+#     (auto-deployed when GPU node pools are created). No separate install needed.
+#   - On EKS/self-managed: Install NVIDIA GPU Operator or standalone DCGM Exporter.
+#     Update the dcgm-gpu-metrics job's namespace and label selector accordingly.
 
 # Enable ClusterRole for Kubernetes service discovery
 clusterRole:
@@ -157,19 +163,28 @@ config:
 
           # ---- GPU & AI/ML Scrape Jobs ----
 
-          # DCGM GPU metrics from NVIDIA GPU Operator
-          # Discovers pods with app.kubernetes.io/name=nvidia-dcgm-exporter label
+          # DCGM GPU metrics — GKE configuration
+          # GKE manages its own DCGM exporter in the gke-managed-system namespace.
+          # No separate DCGM exporter install is needed on GKE.
+          #
+          # For EKS/self-managed clusters with NVIDIA GPU Operator, change:
+          #   - Remove the namespaces filter (or set to your DCGM exporter namespace)
+          #   - Change regex to: nvidia-dcgm-exporter
           - job_name: 'dcgm-gpu-metrics'
             scrape_interval: 15s
             scrape_timeout: 10s
             honor_labels: true
             kubernetes_sd_configs:
               - role: pod
+                namespaces:
+                  names:
+                    - gke-managed-system
             relabel_configs:
-              # Only scrape DCGM exporter pods
+              # Only scrape GKE-managed DCGM exporter pods
+              # For EKS/self-managed: change regex to nvidia-dcgm-exporter
               - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
                 action: keep
-                regex: nvidia-dcgm-exporter
+                regex: gke-managed-dcgm-exporter
 
               # Target the DCGM metrics port (9400)
               - source_labels: [__meta_kubernetes_pod_ip]

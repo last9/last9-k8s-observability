@@ -31,7 +31,7 @@ set -e  # Exit on any error
 # Configuration defaults
 NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
-COLLECTOR_VERSION="0.126.0"
+COLLECTOR_VERSION="0.125.0"
 MONITORING_VERSION="75.15.1"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
