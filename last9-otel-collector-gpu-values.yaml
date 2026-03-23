@@ -1,16 +1,22 @@
 # GPU and AI/ML metrics scraping configuration for OpenTelemetry Collector
 # Includes NVIDIA DCGM GPU metrics and Ray (KubeRay) application metrics
 #
+# Supports two DCGM deployment models (see "VARIANT A / B" in scrape_configs):
+#   - Self-managed: NVIDIA GPU Operator on EKS, AKS, or bare-metal (default)
+#   - GKE-managed:  GKE's built-in DCGM exporter in gke-managed-system namespace
+#
 # This file extends the base metrics configuration with GPU-specific scrape jobs.
 # Use INSTEAD OF last9-otel-collector-metrics-values.yaml (not alongside it):
 #
-#   helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+#   helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
 #     --namespace last9 \
+#     --version 0.125.0 \
 #     --values last9-otel-collector-values.yaml \
 #     --values last9-otel-collector-gpu-values.yaml
 #
 # Prerequisites:
-#   - NVIDIA GPU Operator installed (for DCGM metrics)
+#   - NVIDIA GPU Operator installed (for DCGM metrics on non-GKE clusters)
+#   - OR GKE cluster with GPU node pools (DCGM is auto-managed by GKE)
 #   - KubeRay Operator installed (for Ray metrics)
 #   - GPU node tolerations if nodes are tainted (see examples/tolerations-gpu-nodes.yaml)
 
@@ -156,9 +162,26 @@ config:
                 target_label: namespace
 
           # ---- GPU & AI/ML Scrape Jobs ----
+          #
+          # DCGM GPU Metrics — pick ONE of the two variants below:
+          #
+          #   VARIANT A (default, uncommented): Self-managed NVIDIA GPU Operator
+          #     - Works on: EKS, AKS, self-managed K8s, or any cluster using the
+          #       NVIDIA GPU Operator (https://github.com/NVIDIA/gpu-operator)
+          #     - DCGM exporter runs in the gpu-operator namespace (or wherever the operator is installed)
+          #     - Pod label: app.kubernetes.io/name=nvidia-dcgm-exporter
+          #
+          #   VARIANT B (commented out): GKE-managed DCGM
+          #     - Works on: GKE clusters with GPU node pools
+          #     - GKE automatically deploys its own DCGM exporter in the gke-managed-system namespace
+          #     - Pod label: app.kubernetes.io/name=gke-managed-dcgm-exporter
+          #
+          # To switch: comment out Variant A and uncomment Variant B (or vice versa).
+          # Do NOT enable both — only one DCGM exporter runs per cluster.
 
-          # DCGM GPU metrics from NVIDIA GPU Operator
+          # ---- VARIANT A: Self-managed NVIDIA GPU Operator (default) ----
           # Discovers pods with app.kubernetes.io/name=nvidia-dcgm-exporter label
+          # across all namespaces (GPU Operator namespace is auto-discovered)
           - job_name: 'dcgm-gpu-metrics'
             scrape_interval: 15s
             scrape_timeout: 10s
@@ -166,7 +189,7 @@ config:
             kubernetes_sd_configs:
               - role: pod
             relabel_configs:
-              # Only scrape DCGM exporter pods
+              # Only scrape NVIDIA GPU Operator DCGM exporter pods
               - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
                 action: keep
                 regex: nvidia-dcgm-exporter
@@ -197,6 +220,52 @@ config:
                 action: keep
                 regex: >-
                   DCGM_FI_DEV_GPU_UTIL|DCGM_FI_DEV_MEM_COPY_UTIL|DCGM_FI_DEV_ENC_UTIL|DCGM_FI_DEV_DEC_UTIL|DCGM_FI_DEV_FB_FREE|DCGM_FI_DEV_FB_USED|DCGM_FI_DEV_FB_TOTAL|DCGM_FI_DEV_GPU_TEMP|DCGM_FI_DEV_MEMORY_TEMP|DCGM_FI_DEV_POWER_USAGE|DCGM_FI_DEV_XID_ERRORS|DCGM_FI_DEV_ECC_SBE_VOL_TOTAL|DCGM_FI_DEV_ECC_DBE_VOL_TOTAL|DCGM_FI_DEV_PCIE_TX_THROUGHPUT|DCGM_FI_DEV_PCIE_RX_THROUGHPUT|DCGM_FI_DEV_SM_CLOCK|DCGM_FI_DEV_MEM_CLOCK|DCGM_FI_DEV_PSTATE
+
+          # ---- VARIANT B: GKE-managed DCGM (uncomment if using GKE) ----
+          # GKE automatically runs DCGM exporter in the gke-managed-system namespace.
+          # To use: uncomment the block below AND comment out Variant A above.
+          #
+          # - job_name: 'dcgm-gpu-metrics'
+          #   scrape_interval: 15s
+          #   scrape_timeout: 10s
+          #   honor_labels: true
+          #   kubernetes_sd_configs:
+          #     - role: pod
+          #       namespaces:
+          #         names:
+          #           - gke-managed-system
+          #   relabel_configs:
+          #     # Only scrape GKE-managed DCGM exporter pods
+          #     - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          #       action: keep
+          #       regex: gke-managed-dcgm-exporter
+          #
+          #     # Target the DCGM metrics port (9400)
+          #     - source_labels: [__meta_kubernetes_pod_ip]
+          #       action: replace
+          #       regex: (.+)
+          #       replacement: $1:9400
+          #       target_label: __address__
+          #
+          #     # Add Kubernetes metadata as labels
+          #     - source_labels: [__meta_kubernetes_pod_name]
+          #       action: replace
+          #       target_label: pod
+          #
+          #     - source_labels: [__meta_kubernetes_namespace]
+          #       action: replace
+          #       target_label: namespace
+          #
+          #     - source_labels: [__meta_kubernetes_pod_node_name]
+          #       action: replace
+          #       target_label: node
+          #
+          #   # Keep only essential DCGM metrics to control cardinality
+          #   metric_relabel_configs:
+          #     - source_labels: [__name__]
+          #       action: keep
+          #       regex: >-
+          #         DCGM_FI_DEV_GPU_UTIL|DCGM_FI_DEV_MEM_COPY_UTIL|DCGM_FI_DEV_ENC_UTIL|DCGM_FI_DEV_DEC_UTIL|DCGM_FI_DEV_FB_FREE|DCGM_FI_DEV_FB_USED|DCGM_FI_DEV_FB_TOTAL|DCGM_FI_DEV_GPU_TEMP|DCGM_FI_DEV_MEMORY_TEMP|DCGM_FI_DEV_POWER_USAGE|DCGM_FI_DEV_XID_ERRORS|DCGM_FI_DEV_ECC_SBE_VOL_TOTAL|DCGM_FI_DEV_ECC_DBE_VOL_TOTAL|DCGM_FI_DEV_PCIE_TX_THROUGHPUT|DCGM_FI_DEV_PCIE_RX_THROUGHPUT|DCGM_FI_DEV_SM_CLOCK|DCGM_FI_DEV_MEM_CLOCK|DCGM_FI_DEV_PSTATE
 
           # Ray head node metrics (KubeRay operator)
           # Discovers Ray head pods by ray.io/node-type=head label
