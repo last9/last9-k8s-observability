@@ -214,8 +214,9 @@ To enable application metrics scraping, deploy with the additional metrics confi
 
 ```bash
 # Deploy with metrics scraping enabled
-helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
   --namespace last9 \
+  --version 0.125.0 \
   --values last9-otel-collector-values.yaml \
   --values last9-otel-collector-metrics-values.yaml
 ```
@@ -289,7 +290,7 @@ This setup scales automatically:
 
 **GPU + App Metrics Configuration:** `last9-otel-collector-gpu-values.yaml`
 - Everything in the app metrics configuration, plus:
-- **DCGM GPU metrics** scraping (NVIDIA GPU Operator)
+- **DCGM GPU metrics** scraping (NVIDIA GPU Operator **or** GKE-managed DCGM — see variants in values file)
 - **Ray head/worker metrics** scraping (KubeRay Operator)
 - **Cardinality control** via metric keep-list for DCGM
 
@@ -319,8 +320,9 @@ GPU and Ray metrics collection is **opt-in**. Use `last9-otel-collector-gpu-valu
 ### Enable GPU Metrics
 
 ```bash
-helm upgrade last9-opentelemetry-collector opentelemetry-collector \
+helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
   --namespace last9 \
+  --version 0.125.0 \
   --values last9-otel-collector-values.yaml \
   --values last9-otel-collector-gpu-values.yaml
 ```
@@ -329,16 +331,21 @@ helm upgrade last9-opentelemetry-collector opentelemetry-collector \
 
 ### Prerequisites
 
-- **DCGM metrics**: [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
+- **DCGM metrics** (pick one):
+  - **Self-managed (EKS, AKS, bare-metal):** [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
+  - **GKE:** GPU node pools enabled — GKE auto-deploys DCGM exporter in `gke-managed-system` namespace (label: `app.kubernetes.io/name=gke-managed-dcgm-exporter`)
 - **Ray metrics**: [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) installed (Ray pods carry `ray.io/node-type` and `ray.io/cluster` labels)
+
+> **Important:** The values file ships with two DCGM variants (A and B). **Variant A** (self-managed NVIDIA GPU Operator) is enabled by default. If you're on **GKE**, comment out Variant A and uncomment Variant B. See the inline comments in `last9-otel-collector-gpu-values.yaml` for details.
 
 ### Scrape Jobs
 
-| Job | Target | Label Selector | Port | Interval |
-|-----|--------|----------------|------|----------|
-| `dcgm-gpu-metrics` | DCGM Exporter pods | `app.kubernetes.io/name=nvidia-dcgm-exporter` | 9400 | 15s |
-| `ray-head` | Ray head nodes | `ray.io/node-type=head` | 8080 | 30s |
-| `ray-workers` | Ray worker nodes | `ray.io/node-type=worker` | 8080 | 30s |
+| Job | Target | Label Selector | Namespace | Port | Interval |
+|-----|--------|----------------|-----------|------|----------|
+| `dcgm-gpu-metrics` (Variant A) | DCGM Exporter pods | `app.kubernetes.io/name=nvidia-dcgm-exporter` | All (auto-discovered) | 9400 | 15s |
+| `dcgm-gpu-metrics` (Variant B) | GKE DCGM Exporter pods | `app.kubernetes.io/name=gke-managed-dcgm-exporter` | `gke-managed-system` | 9400 | 15s |
+| `ray-head` | Ray head nodes | `ray.io/node-type=head` | All | 8080 | 30s |
+| `ray-workers` | Ray worker nodes | `ray.io/node-type=worker` | All | 8080 | 30s |
 
 ### DCGM Metrics Collected
 
@@ -380,6 +387,22 @@ For clusters with many GPU nodes, the collector handles additional scrape target
 | 50-100 | 1000m / 2000m | 2Gi / 4Gi |
 
 Override resources in your Helm values or pass a custom values file.
+
+### Detect Your DCGM Variant
+
+Before deploying, check which DCGM exporter is running in your cluster to pick the right variant:
+
+```bash
+# Check for GKE-managed DCGM exporter (Variant B)
+kubectl get pods -n gke-managed-system -l app.kubernetes.io/name=gke-managed-dcgm-exporter
+
+# Check for self-managed NVIDIA GPU Operator DCGM exporter (Variant A)
+kubectl get pods -A -l app.kubernetes.io/name=nvidia-dcgm-exporter
+```
+
+- If the first command returns pods → use **Variant B** (uncomment it, comment out Variant A)
+- If the second command returns pods → use **Variant A** (the default, no changes needed)
+- If neither returns pods → your DCGM exporter is not yet installed (see [Prerequisites](#prerequisites))
 
 ### GPU & Ray Verification
 
