@@ -95,6 +95,20 @@ check_yq_available() {
     fi
 }
 
+# Detect Helm major version and set schema validation flag
+# Helm v4+ enforces stricter JSON Schema validation (Draft 2019-09) which
+# may reject upstream charts with schema bugs. We add --skip-schema-validation
+# for Helm v4+ since K8s admission controllers still validate all resources.
+HELM_SCHEMA_FLAG=""
+detect_helm_version() {
+    local helm_ver
+    helm_ver=$(helm version --short 2>/dev/null | grep -oE 'v[0-9]+' | head -1 | tr -d 'v')
+    if [ -n "$helm_ver" ] && [ "$helm_ver" -ge 4 ] 2>/dev/null; then
+        HELM_SCHEMA_FLAG="--skip-schema-validation"
+        log_info "Helm v${helm_ver} detected — adding --skip-schema-validation for chart compatibility"
+    fi
+}
+
 # Load and parse tolerations from YAML file
 load_tolerations_from_file() {
     local file_path="$1"
@@ -1403,11 +1417,14 @@ update_monitoring_endpoint() {
 # Function to setup Helm repositories
 setup_helm_repos() {
     log_info "Setting up Helm repositories..."
-    
+
+    # Detect Helm version for compatibility flags
+    detect_helm_version
+
     helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo update
-    
+
     log_info "Helm repositories updated!"
 }
 
@@ -1450,6 +1467,11 @@ install_operator() {
             done < <(echo "$node_selector_args" | xargs -n1)
             log_info "✓ NodeSelector added to operator"
         fi
+    fi
+
+    # Add schema validation skip for Helm v4+ compatibility
+    if [ -n "$HELM_SCHEMA_FLAG" ]; then
+        helm_args+=("$HELM_SCHEMA_FLAG")
     fi
 
     # Execute helm command
@@ -1529,8 +1551,9 @@ install_collector() {
         --version "$COLLECTOR_VERSION" \
         -n "$NAMESPACE" \
         --create-namespace \
-        -f "$values_file"
-    
+        -f "$values_file" \
+        $HELM_SCHEMA_FLAG
+
     log_info "OpenTelemetry Collector installed!"
 }
 
@@ -1751,7 +1774,8 @@ setup_last9_monitoring() {
         --version "$MONITORING_VERSION" \
         -n "$NAMESPACE" \
         -f k8s-monitoring-values.yaml \
-        --create-namespace
+        --create-namespace \
+        $HELM_SCHEMA_FLAG
 
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 
@@ -1874,7 +1898,8 @@ install_events_agent() {
         --version 0.125.0 \
         -n "$NAMESPACE" \
         --create-namespace \
-        -f last9-kube-events-agent-values.yaml
+        -f last9-kube-events-agent-values.yaml \
+        $HELM_SCHEMA_FLAG
 
     log_info "✓ Last9 Kubernetes Events Agent deployed successfully!"
 
@@ -2309,7 +2334,8 @@ main() {
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
                         --create-namespace \
-                        -f "$VALUES_FILE"
+                        -f "$VALUES_FILE" \
+                        $HELM_SCHEMA_FLAG
                 else
                     # Use default behavior - clone repo and use default values file with token replacement
                     setup_repository
