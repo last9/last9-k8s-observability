@@ -1,28 +1,10 @@
-# Last9 OpenTelemetry Operator Setup
+# Last9 OpenTelemetry Operator
 
-Automated setup script for deploying OpenTelemetry Operator, Collector, Kubernetes monitoring, and Events collection to your Kubernetes cluster with Last9 integration.
+A setup script that deploys the OpenTelemetry Operator, Collector, Kubernetes monitoring stack, and events collection to your cluster — all wired to Last9. You need `kubectl` and `helm` (v3+) configured before running anything.
 
-## Features
+## Install
 
-- ✅ **One-command installation** - Deploy everything with a single command
-- ✅ **Flexible deployment options** - Install only what you need (logs, traces, metrics, events)
-- ✅ **Auto-instrumentation** - Automatic instrumentation for Java, Python, Node.js, and more
-- ✅ **Kubernetes monitoring** - Full cluster observability with kube-prometheus-stack
-- ✅ **Events collection** - Capture and forward Kubernetes events
-- ✅ **Cluster identification** - Automatic cluster name detection and attribution
-- ✅ **Tolerations support** - Deploy on tainted nodes (control-plane, spot instances, etc.)
-- ✅ **Environment customization** - Override deployment environment and cluster name
-
-## Quick Start
-
-### Prerequisites
-
-- `kubectl` configured to access your Kubernetes cluster
-- `helm` (v3+) installed
-
-### Option 1: Install Everything (Recommended)
-
-Installs OpenTelemetry Operator, Collector, Kubernetes monitoring stack, and Events agent:
+The default install deploys everything: OTel Operator, Collector, kube-prometheus-stack, and the events agent.
 
 ```bash
 ./last9-otel-setup.sh \
@@ -33,7 +15,7 @@ Installs OpenTelemetry Operator, Collector, Kubernetes monitoring stack, and Eve
   password="<your-password>"
 ```
 
-### Quick Install (One-liner)
+Or pipe it directly:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-otel-setup.sh | bash -s -- \
@@ -44,176 +26,79 @@ curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-o
   password="<pass>"
 ```
 
-## Installation Options
+## Partial Installs
 
-### Option 2: Traces Only (Operator + Collector)
-
-For applications that need distributed tracing:
+If you only need a subset of the stack:
 
 ```bash
+# Traces and logs only (Operator + Collector, no monitoring stack)
 ./last9-otel-setup.sh operator-only \
   token="Basic <your-token>" \
   endpoint="<your-otlp-endpoint>"
-```
 
-### Option 3: Logs Only (Collector without Operator)
-
-For log collection use cases:
-
-```bash
+# Logs only (Collector without Operator)
 ./last9-otel-setup.sh logs-only \
   token="Basic <your-token>" \
   endpoint="<your-otlp-endpoint>"
-```
 
-### Option 4: Metrics Only (Kubernetes Monitoring)
-
-For cluster metrics and monitoring:
-
-```bash
+# Cluster metrics only (kube-prometheus-stack)
 ./last9-otel-setup.sh monitoring-only \
   monitoring-endpoint="<your-metrics-endpoint>" \
   username="<your-username>" \
   password="<your-password>"
-```
 
-### Option 5: Kubernetes Events Only
-
-For Kubernetes events collection:
-
-```bash
+# Kubernetes events only
 ./last9-otel-setup.sh events-only \
-  endpoint="<your-otlp-endpoint>" \
   token="Basic <your-base64-token>" \
+  endpoint="<your-otlp-endpoint>" \
   monitoring-endpoint="<your-metrics-endpoint>"
 ```
 
-## Advanced Configuration
+## Configuration Options
 
-### Override Cluster Name
+**Cluster name** — defaults to the current kubectl context. Override it:
 
 ```bash
 ./last9-otel-setup.sh \
-  token="..." \
-  endpoint="..." \
+  token="..." endpoint="..." \
   cluster="prod-us-east-1"
 ```
 
-If not provided, the cluster name is auto-detected from `kubectl config current-context`.
-
-### Set Deployment Environment
+**Deployment environment** — defaults to `staging` for the collector and `local` for auto-instrumentation. Override it:
 
 ```bash
 ./last9-otel-setup.sh \
-  token="..." \
-  endpoint="..." \
+  token="..." endpoint="..." \
   env="production"
 ```
 
-Default: `staging` for collector, `local` for auto-instrumentation.
-
-### Deploy with Tolerations
-
-For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
+**Tolerations** — for nodes with taints (control-plane, spot instances, GPU nodes):
 
 ```bash
 ./last9-otel-setup.sh \
-  token="..." \
-  endpoint="..." \
-  tolerations-file=/path/to/tolerations.yaml
+  token="..." endpoint="..." \
+  tolerations-file=examples/tolerations-gpu-nodes.yaml
 ```
 
-**Example tolerations files** are provided in the `examples/` directory:
-- `tolerations-all-nodes.yaml` - Deploy on all nodes including control-plane
-- `tolerations-monitoring-nodes.yaml` - Deploy on dedicated monitoring nodes
-- `tolerations-spot-instances.yaml` - Deploy on spot/preemptible instances
-- `tolerations-multi-taint.yaml` - Handle multiple taints
-- `tolerations-nodeSelector-only.yaml` - Use nodeSelector without tolerations
-- `tolerations-gpu-nodes.yaml` - Deploy on GPU nodes with `nvidia.com/gpu` taints
-
-## Configuration Files
-
-| File | Description |
-|------|-------------|
-| `last9-otel-collector-values.yaml` | OpenTelemetry Collector configuration for logs and traces |
-| `last9-otel-collector-metrics-values.yaml` | Optional: Application metrics scraping (Prometheus SD) |
-| `last9-otel-collector-gpu-values.yaml` | Optional: GPU (DCGM) + Ray metrics scraping (includes app metrics) |
-| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for metrics |
-| `last9-kube-events-agent-values.yaml` | Events collection agent configuration |
-| `collector-svc.yaml` | Collector service for application instrumentation |
-| `instrumentation.yaml` | Auto-instrumentation configuration |
-| `deploy.yaml` | Sample application deployment with auto-instrumentation |
-| `tolerations.yaml` | Sample tolerations configuration |
-
-### Placeholders
-
-The following placeholders are automatically replaced during installation:
-
-- `{{AUTH_TOKEN}}` - Your Last9 authorization token
-- `{{OTEL_ENDPOINT}}` - Your OTEL endpoint URL
-- `{{MONITORING_ENDPOINT}}` - Your metrics endpoint URL
-
-## Uninstallation
-
-### Uninstall Everything
-
-```bash
-./last9-otel-setup.sh uninstall-all
-```
-
-### Uninstall Specific Components
-
-```bash
-# Uninstall only monitoring stack
-./last9-otel-setup.sh uninstall function="uninstall_last9_monitoring"
-
-# Uninstall only events agent
-./last9-otel-setup.sh uninstall function="uninstall_events_agent"
-
-# Uninstall OpenTelemetry components (operator + collector)
-./last9-otel-setup.sh uninstall
-```
-
-## Verification
-
-After installation, verify the deployment:
-
-```bash
-# Check all pods in last9 namespace
-kubectl get pods -n last9
-
-# Check collector logs
-kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-collector
-
-# Check monitoring stack
-kubectl get prometheus -n last9
-
-# Check events agent
-kubectl get pods -n last9 -l app.kubernetes.io/name=last9-kube-events-agent
-```
+The `examples/` directory has ready-made tolerations files for common scenarios: all nodes, monitoring-dedicated nodes, spot instances, multi-taint, nodeSelector-only, and GPU nodes.
 
 ## Auto-Instrumentation
 
-The script automatically sets up instrumentation for:
+The install sets up zero-code instrumentation for Java, Python, and Node.js via the OTel Operator. Go requires manual instrumentation.
 
-- ☕ **Java** - Automatic OTLP export
-- 🐍 **Python** - Automatic OTLP export
-- 🟢 **Node.js** - Automatic OTLP export
-- 🔵 **Go** - Manual instrumentation supported
-- 💎 **Ruby** - Coming soon
+Annotate your pods to opt in:
 
-## Application Metrics Scraping (Optional)
+```yaml
+instrumentation.opentelemetry.io/inject-java: "true"
+instrumentation.opentelemetry.io/inject-python: "true"
+instrumentation.opentelemetry.io/inject-nodejs: "true"
+```
 
-The OpenTelemetry Collector can automatically discover and scrape application metrics using Kubernetes service discovery with Prometheus-compatible scraping.
+## Application Metrics Scraping
 
-**Note:** This is an optional feature. Use `last9-otel-collector-metrics-values.yaml` to enable metrics scraping.
-
-### Enable Metrics Scraping
-
-To enable application metrics scraping, deploy with the additional metrics configuration file:
+By default the collector handles traces and logs. To also scrape Prometheus-format application metrics, layer on the metrics values file:
 
 ```bash
-# Deploy with metrics scraping enabled
 helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
   --namespace last9 \
   --version 0.125.0 \
@@ -221,103 +106,17 @@ helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetr
   --values last9-otel-collector-metrics-values.yaml
 ```
 
-**Configure Last9 Metrics Endpoint:**
+Any pod with `prometheus.io/scrape: "true"` will be discovered and scraped automatically. The supported annotations are:
 
-Before deploying, update these placeholders in `last9-otel-collector-metrics-values.yaml`:
-- `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 Prometheus remote write URL
-- `{{LAST9_METRICS_USERNAME}}` - Your Last9 metrics username
-- `{{LAST9_METRICS_PASSWORD}}` - Your Last9 metrics password
+| Annotation | Required | Default |
+|---|---|---|
+| `prometheus.io/scrape` | yes | — |
+| `prometheus.io/port` | yes | — |
+| `prometheus.io/path` | no | `/metrics` |
 
-### Quick Start
+## GPU and Ray Metrics
 
-Add these annotations to your pod template or service to enable automatic metrics scraping:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: my-app
-spec:
-  template:
-    metadata:
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: "/metrics"  # Optional, defaults to /metrics
-```
-
-That's it! Your application metrics will be automatically:
-- **Discovered** - No manual configuration needed
-- **Scraped** - Every 30 seconds by default
-- **Enriched** - With pod, namespace, node labels
-- **Exported** - To Last9 via Prometheus remote write
-
-### How It Works
-
-1. **Automatic Discovery** - OTel Collector watches Kubernetes API for all pods/services
-2. **Annotation-Based Filtering** - Only scrapes resources with `prometheus.io/scrape: "true"`
-3. **Metadata Enrichment** - Adds Kubernetes labels automatically (pod, namespace, node, app)
-4. **Direct Export** - Sends metrics to Last9 Prometheus endpoint
-
-### Supported Annotations
-
-| Annotation | Required | Default | Description |
-|------------|----------|---------|-------------|
-| `prometheus.io/scrape` | Yes | - | Set to "true" to enable scraping |
-| `prometheus.io/port` | Yes | - | Port number exposing /metrics |
-| `prometheus.io/path` | No | /metrics | HTTP path for metrics endpoint |
-
-### Scaling
-
-This setup scales automatically:
-- **1 service** → Automatically scraped
-- **1000 services** → Automatically scraped
-- **No configuration changes needed** when adding new services
-
-### Configuration Files
-
-**Base Configuration:** `last9-otel-collector-values.yaml`
-- Traces and logs collection
-- Basic OTLP receiver
-- No metrics scraping
-
-**App Metrics Configuration:** `last9-otel-collector-metrics-values.yaml`
-- **Prometheus receiver** with kubernetes_sd_configs for auto-discovery
-- **prometheusremotewrite exporter** for sending to Last9
-- **RBAC** for Kubernetes API access
-- **Increased resource limits** for collector pods
-- **BasicAuth extension** for Last9 metrics endpoint
-
-**GPU + App Metrics Configuration:** `last9-otel-collector-gpu-values.yaml`
-- Everything in the app metrics configuration, plus:
-- **DCGM GPU metrics** scraping (NVIDIA GPU Operator **or** GKE-managed DCGM — see variants in values file)
-- **Ray head/worker metrics** scraping (KubeRay Operator)
-- **Cardinality control** via metric keep-list for DCGM
-
-Choose ONE metrics overlay:
-- App metrics only: `--values last9-otel-collector-values.yaml --values last9-otel-collector-metrics-values.yaml`
-- App + GPU metrics: `--values last9-otel-collector-values.yaml --values last9-otel-collector-gpu-values.yaml`
-
-### Verification
-
-Check if metrics are being scraped:
-
-```bash
-# Check collector logs for scraping
-kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep kubernetes-pods
-
-# Port-forward to collector metrics endpoint
-kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
-
-# Check scrape status
-curl http://localhost:8888/metrics | grep scrape_samples_scraped
-```
-
-## GPU Metrics (DCGM) & Ray Metrics Scraping
-
-GPU and Ray metrics collection is **opt-in**. Use `last9-otel-collector-gpu-values.yaml` instead of the base metrics file to enable these scrape jobs. They use label-based discovery — no annotation changes needed on DCGM or Ray pods.
-
-### Enable GPU Metrics
+For NVIDIA GPU (DCGM) and Ray metrics, use `last9-otel-collector-gpu-values.yaml` instead of the base metrics file — it includes all application scrape jobs plus DCGM and Ray.
 
 ```bash
 helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
@@ -327,97 +126,67 @@ helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetr
   --values last9-otel-collector-gpu-values.yaml
 ```
 
-> **Note:** Use `last9-otel-collector-gpu-values.yaml` **instead of** `last9-otel-collector-metrics-values.yaml` — the GPU file already includes all application metrics scrape jobs.
-
-### Prerequisites
-
-- **DCGM metrics** (pick one):
-  - **Self-managed (EKS, AKS, bare-metal):** [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed (includes DCGM Exporter with `app.kubernetes.io/name=nvidia-dcgm-exporter` label)
-  - **GKE:** GPU node pools enabled — GKE auto-deploys DCGM exporter in `gke-managed-system` namespace (label: `app.kubernetes.io/name=gke-managed-dcgm-exporter`)
-- **Ray metrics**: [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html) installed (Ray pods carry `ray.io/node-type` and `ray.io/cluster` labels)
-
-> **Important:** The values file ships with two DCGM variants (A and B). **Variant A** (self-managed NVIDIA GPU Operator) is enabled by default. If you're on **GKE**, comment out Variant A and uncomment Variant B. See the inline comments in `last9-otel-collector-gpu-values.yaml` for details.
-
-### Scrape Jobs
-
-| Job | Target | Label Selector | Namespace | Port | Interval |
-|-----|--------|----------------|-----------|------|----------|
-| `dcgm-gpu-metrics` (Variant A) | DCGM Exporter pods | `app.kubernetes.io/name=nvidia-dcgm-exporter` | All (auto-discovered) | 9400 | 15s |
-| `dcgm-gpu-metrics` (Variant B) | GKE DCGM Exporter pods | `app.kubernetes.io/name=gke-managed-dcgm-exporter` | `gke-managed-system` | 9400 | 15s |
-| `ray-head` | Ray head nodes | `ray.io/node-type=head` | All | 8080 | 30s |
-| `ray-workers` | Ray worker nodes | `ray.io/node-type=worker` | All | 8080 | 30s |
-
-### DCGM Metrics Collected
-
-The DCGM job includes a cardinality keep-list limiting collection to 18 key metrics:
-
-- **Utilization**: `DCGM_FI_DEV_GPU_UTIL`, `DCGM_FI_DEV_MEM_COPY_UTIL`, `DCGM_FI_DEV_ENC_UTIL`, `DCGM_FI_DEV_DEC_UTIL`
-- **Memory**: `DCGM_FI_DEV_FB_FREE`, `DCGM_FI_DEV_FB_USED`, `DCGM_FI_DEV_FB_TOTAL`
-- **Temperature & Power**: `DCGM_FI_DEV_GPU_TEMP`, `DCGM_FI_DEV_MEMORY_TEMP`, `DCGM_FI_DEV_POWER_USAGE`
-- **Errors**: `DCGM_FI_DEV_XID_ERRORS`, `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL`, `DCGM_FI_DEV_ECC_DBE_VOL_TOTAL`
-- **PCIe**: `DCGM_FI_DEV_PCIE_TX_THROUGHPUT`, `DCGM_FI_DEV_PCIE_RX_THROUGHPUT`
-- **Clock & Performance**: `DCGM_FI_DEV_SM_CLOCK`, `DCGM_FI_DEV_MEM_CLOCK`, `DCGM_FI_DEV_PSTATE`
-
-To add more DCGM metrics, extend the `metric_relabel_configs` regex in `last9-otel-collector-gpu-values.yaml`.
-
-### GPU Node Tolerations
-
-If your GPU nodes have `nvidia.com/gpu` taints, the OTel Collector and node exporter need tolerations to schedule on those nodes:
+The values file ships two DCGM variants. Variant A (default) targets `nvidia-dcgm-exporter` pods from the NVIDIA GPU Operator — used on EKS, AKS, and bare-metal. Variant B targets `gke-managed-dcgm-exporter` in the `gke-managed-system` namespace — used on GKE. Check which is running in your cluster:
 
 ```bash
-./last9-otel-setup.sh \
-  token="..." \
-  endpoint="..." \
-  monitoring-endpoint="..." \
-  username="..." \
-  password="..." \
-  tolerations-file=examples/tolerations-gpu-nodes.yaml
-```
-
-See `examples/tolerations-gpu-nodes.yaml` for the toleration configuration.
-
-### Resource Scaling for Large GPU Fleets
-
-For clusters with many GPU nodes, the collector handles additional scrape targets. Suggested resource scaling:
-
-| GPU Nodes | CPU Request/Limit | Memory Request/Limit |
-|-----------|-------------------|----------------------|
-| 1-10 | 250m / 500m | 512Mi / 1Gi |
-| 10-50 | 500m / 1000m | 1Gi / 2Gi |
-| 50-100 | 1000m / 2000m | 2Gi / 4Gi |
-
-Override resources in your Helm values or pass a custom values file.
-
-### Detect Your DCGM Variant
-
-Before deploying, check which DCGM exporter is running in your cluster to pick the right variant:
-
-```bash
-# Check for GKE-managed DCGM exporter (Variant B)
+# GKE
 kubectl get pods -n gke-managed-system -l app.kubernetes.io/name=gke-managed-dcgm-exporter
 
-# Check for self-managed NVIDIA GPU Operator DCGM exporter (Variant A)
+# Self-managed (NVIDIA GPU Operator)
 kubectl get pods -A -l app.kubernetes.io/name=nvidia-dcgm-exporter
 ```
 
-- If the first command returns pods → use **Variant B** (uncomment it, comment out Variant A)
-- If the second command returns pods → use **Variant A** (the default, no changes needed)
-- If neither returns pods → your DCGM exporter is not yet installed (see [Prerequisites](#prerequisites))
+If you're on GKE, comment out Variant A and uncomment Variant B in the values file. See the inline comments for specifics.
 
-### GPU & Ray Verification
+DCGM collection is capped to 18 key metrics (utilization, memory, temperature, power, errors, PCIe, clock) via a `metric_relabel_configs` keep-list. To collect additional DCGM metrics, extend that regex in `last9-otel-collector-gpu-values.yaml`.
+
+Ray metrics are discovered by label (`ray.io/node-type`) and require [KubeRay Operator](https://docs.ray.io/en/latest/cluster/kubernetes/getting-started.html).
+
+For GPU nodes with `nvidia.com/gpu` taints, pass a tolerations file so the collector can schedule there:
 
 ```bash
-# Verify DCGM exporter pods are discovered
-kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep dcgm-gpu-metrics
+./last9-otel-setup.sh \
+  token="..." endpoint="..." monitoring-endpoint="..." \
+  username="..." password="..." \
+  tolerations-file=examples/tolerations-gpu-nodes.yaml
+```
 
-# Verify Ray head/worker pods are discovered
-kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep ray-head
-kubectl logs -n last9 -l app.kubernetes.io/name=last9-otel-collector | grep ray-workers
+Collector resource needs scale with the number of GPU nodes. These numbers are starting points, not guarantees — benchmark against your actual scrape load:
 
-# Check DCGM metrics are being scraped
+| GPU Nodes | CPU Request/Limit | Memory Request/Limit |
+|---|---|---|
+| 1–10 | 250m / 500m | 512Mi / 1Gi |
+| 10–50 | 500m / 1000m | 1Gi / 2Gi |
+| 50–100 | 1000m / 2000m | 2Gi / 4Gi |
+
+## Uninstall
+
+```bash
+# Everything
+./last9-otel-setup.sh uninstall-all
+
+# Only the monitoring stack
+./last9-otel-setup.sh uninstall function="uninstall_last9_monitoring"
+
+# Only the events agent
+./last9-otel-setup.sh uninstall function="uninstall_events_agent"
+
+# OTel Operator and Collector only
+./last9-otel-setup.sh uninstall
+```
+
+## Verify
+
+```bash
+kubectl get pods -n last9
+kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-collector
+kubectl get prometheus -n last9
+kubectl get pods -n last9 -l app.kubernetes.io/name=last9-kube-events-agent
+```
+
+For metrics scraping specifically:
+
+```bash
 kubectl port-forward -n last9 daemonset/last9-otel-collector 8888:8888
-curl -s http://localhost:8888/metrics | grep -c "DCGM_FI_DEV"
-
-# Check Ray metrics are being scraped
-curl -s http://localhost:8888/metrics | grep scrape_samples_scraped | grep ray
+curl http://localhost:8888/metrics | grep scrape_samples_scraped
 ```
