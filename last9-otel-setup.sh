@@ -1271,7 +1271,8 @@ update_cluster_name_attribute() {
         # Check if cluster.name attribute already exists
         if grep -q "cluster\.name" last9-otel-collector-values.yaml; then
             log_info "cluster.name attribute already exists, updating value..."
-            sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$cluster_name\"/" last9-otel-collector-values.yaml
+            escaped_cluster=$(printf '%s\n' "$cluster_name" | sed 's/[&/\]/\\&/g')
+            sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$escaped_cluster\"/" last9-otel-collector-values.yaml
             rm -f last9-otel-collector-values.yaml.tmp
         else
             log_info "Adding cluster.name attribute after deployment.environment..."
@@ -1324,7 +1325,8 @@ update_events_agent_cluster_name() {
         # Check if cluster.name attribute already exists
         if grep -q "cluster\.name" last9-kube-events-agent-values.yaml; then
             log_info "cluster.name attribute already exists, updating value..."
-            sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$cluster_name\"/" last9-kube-events-agent-values.yaml
+            escaped_cluster=$(printf '%s\n' "$cluster_name" | sed 's/[&/\]/\\&/g')
+            sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$escaped_cluster\"/" last9-kube-events-agent-values.yaml
             rm -f last9-kube-events-agent-values.yaml.tmp
         else
             log_info "Adding cluster.name attribute after deployment.environment..."
