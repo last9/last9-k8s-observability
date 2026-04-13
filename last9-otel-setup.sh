@@ -1667,6 +1667,34 @@ create_logs_only_config() {
     log_info "Logs-only values file created: $VALUES_FILE"
 }
 
+# Function to detect an existing Prometheus Operator running in the cluster.
+# Returns 0 (found) or 1 (not found).
+#
+# Running two Prometheus Operators with cluster-wide scope causes a
+# reconciliation conflict: both operators continuously overwrite the
+# PrometheusAgent StatefulSet with their own image tags, keeping the pod
+# in a permanent restart loop (PodInitializing → Terminating → repeat).
+# Disabling the bundled operator in Last9's install resolves this.
+detect_existing_prometheus_operator() {
+    log_info "Checking for existing Prometheus Operator installation..."
+
+    local found_ns
+    found_ns=$(kubectl get deployment -A \
+        -l "app.kubernetes.io/component=prometheus-operator" \
+        -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' 2>/dev/null \
+        | awk -v ns="$NAMESPACE" '$1 != ns {print; exit}')
+
+    if [ -n "$found_ns" ]; then
+        log_warn "⚠ Existing Prometheus Operator found in namespace '$found_ns'."
+        log_warn "  Two cluster-wide operators fight over the PrometheusAgent StatefulSet,"
+        log_warn "  keeping the pod in a restart loop. Disabling the bundled operator."
+        return 0
+    fi
+
+    log_info "No existing Prometheus Operator found — bundled operator will be installed."
+    return 1
+}
+
 # Function to setup Last9 monitoring stack
 setup_last9_monitoring() {
     log_info "Setting up Last9 monitoring stack..."
@@ -1770,6 +1798,13 @@ setup_last9_monitoring() {
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo update
 
+    # Detect an existing cluster-wide Prometheus Operator and disable the
+    # bundled one if found, to prevent the two-operator reconciliation conflict.
+    local operator_flag=""
+    if detect_existing_prometheus_operator; then
+        operator_flag="--set prometheusOperator.enabled=false"
+    fi
+
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
     helm upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
@@ -1777,7 +1812,8 @@ setup_last9_monitoring() {
         -n "$NAMESPACE" \
         -f k8s-monitoring-values.yaml \
         --create-namespace \
-        $HELM_SCHEMA_FLAG
+        $HELM_SCHEMA_FLAG \
+        $operator_flag
 
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 
