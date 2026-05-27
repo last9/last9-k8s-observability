@@ -1430,9 +1430,55 @@ setup_helm_repos() {
     log_info "Helm repositories updated!"
 }
 
+# Adopt pre-existing OTel CRDs into this Helm release so that
+# "helm upgrade --install" does not fail with ownership metadata errors.
+# This happens when CRDs were previously installed by a different release
+# name/namespace or directly via kubectl apply.
+adopt_otel_crds() {
+    local release_name="opentelemetry-operator"
+    local release_ns="$NAMESPACE"
+
+    log_info "Checking for pre-existing OpenTelemetry CRDs to adopt..."
+
+    local crds
+    crds=$(kubectl get crd -o name 2>/dev/null | grep '\.opentelemetry\.io' || true)
+
+    if [ -z "$crds" ]; then
+        log_info "No existing OpenTelemetry CRDs found, skipping adoption."
+        return 0
+    fi
+
+    local adopted=0
+    while IFS= read -r crd; do
+        local managed_by
+        managed_by=$(kubectl get "$crd" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+        local rel_name
+        rel_name=$(kubectl get "$crd" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
+
+        if [ "$managed_by" != "Helm" ] || [ "$rel_name" != "$release_name" ]; then
+            log_info "Adopting CRD into Helm release: $crd"
+            kubectl label --overwrite "$crd" \
+                "app.kubernetes.io/managed-by=Helm" 2>/dev/null || true
+            kubectl annotate --overwrite "$crd" \
+                "meta.helm.sh/release-name=$release_name" \
+                "meta.helm.sh/release-namespace=$release_ns" 2>/dev/null || true
+            adopted=$((adopted + 1))
+        fi
+    done <<< "$crds"
+
+    if [ "$adopted" -gt 0 ]; then
+        log_info "✓ Adopted $adopted OpenTelemetry CRD(s) into Helm release '$release_name' in namespace '$release_ns'"
+    else
+        log_info "✓ All existing OpenTelemetry CRDs already owned by correct Helm release"
+    fi
+}
+
 # Function to install OpenTelemetry Operator
 install_operator() {
     log_info "Installing OpenTelemetry Operator..."
+
+    # Adopt any pre-existing OTel CRDs before Helm tries to manage them
+    adopt_otel_crds
 
     # Build helm command as array for proper argument handling
     local helm_args=(
@@ -2597,6 +2643,7 @@ main() {
 # Handle script interruption and cleanup
 trap cleanup EXIT INT TERM
 
-# Run main function
-main "$@"
+# Run main function when executed directly (not sourced for testing).
+# The || true prevents set -e from exiting when condition is false (sourced context).
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@" || true
 
