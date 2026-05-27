@@ -1444,22 +1444,36 @@ setup_helm_repos() {
 #      (.spec.versions, annotations). Fixed by re-applying each CRD with
 #      "kubectl apply --server-side --force-conflicts --field-manager=helm",
 #      which migrates field ownership to Helm's field manager.
-adopt_otel_crds() {
-    local release_name="opentelemetry-operator"
+# Generic CRD adoption: claim pre-existing CRDs matching a grep pattern into a
+# target Helm release. Handles BOTH the Helm v3-style ownership check (label +
+# annotations) AND the Helm v4 server-side-apply field-manager conflict
+# (re-apply as field-manager "helm" with --force-conflicts).
+#
+# Args:
+#   $1 - human-readable group label for log messages (e.g. "OpenTelemetry")
+#   $2 - grep pattern matched against `kubectl get crd -o name` output
+#        (e.g. '\.opentelemetry\.io' or 'monitoring\.coreos\.com')
+#   $3 - target Helm release name to claim ownership for
+# The target release namespace is always "$NAMESPACE".
+adopt_crds_for_release() {
+    local group_label="$1"
+    local crd_pattern="$2"
+    local release_name="$3"
     local release_ns="$NAMESPACE"
 
-    log_info "Checking for pre-existing OpenTelemetry CRDs to adopt..."
+    log_info "Checking for pre-existing ${group_label} CRDs to adopt..."
 
     local crds
-    crds=$(kubectl get crd -o name 2>/dev/null | grep '\.opentelemetry\.io' || true)
+    crds=$(kubectl get crd -o name 2>/dev/null | grep "$crd_pattern" || true)
 
     if [ -z "$crds" ]; then
-        log_info "No existing OpenTelemetry CRDs found, skipping adoption."
+        log_info "No existing ${group_label} CRDs found, skipping adoption."
         return 0
     fi
 
     local adopted=0
     while IFS= read -r crd; do
+        [ -z "$crd" ] && continue
         local managed_by
         managed_by=$(kubectl get "$crd" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
         local rel_name
@@ -1477,7 +1491,8 @@ adopt_otel_crds() {
 
             # (2) Migrate field-manager ownership for Helm v4 server-side apply.
             # Re-apply the live CRD as field-manager "helm" with --force-conflicts
-            # so Helm's subsequent SSA does not conflict with kubectl-client-side-apply.
+            # so Helm's subsequent SSA does not conflict with kubectl-client-side-apply
+            # or terraform-provider-helm.
             kubectl get "$crd" -o yaml 2>/dev/null \
                 | kubectl apply --server-side --force-conflicts --field-manager=helm -f - >/dev/null 2>&1 || true
 
@@ -1486,10 +1501,24 @@ adopt_otel_crds() {
     done <<< "$crds"
 
     if [ "$adopted" -gt 0 ]; then
-        log_info "✓ Adopted $adopted OpenTelemetry CRD(s) into Helm release '$release_name' in namespace '$release_ns'"
+        log_info "✓ Adopted $adopted ${group_label} CRD(s) into Helm release '$release_name' in namespace '$release_ns'"
     else
-        log_info "✓ All existing OpenTelemetry CRDs already owned by correct Helm release"
+        log_info "✓ All existing ${group_label} CRDs already owned by correct Helm release"
     fi
+}
+
+# Adopt pre-existing OpenTelemetry CRDs (suffix .opentelemetry.io) into the
+# "opentelemetry-operator" Helm release. Thin wrapper over adopt_crds_for_release.
+adopt_otel_crds() {
+    adopt_crds_for_release "OpenTelemetry" '\.opentelemetry\.io' "opentelemetry-operator"
+}
+
+# Adopt pre-existing Prometheus operator CRDs (suffix monitoring.coreos.com)
+# into the "last9-k8s-monitoring" Helm release. Thin wrapper over
+# adopt_crds_for_release. The release name MUST match the helm release used in
+# setup_last9_monitoring (last9-k8s-monitoring / kube-prometheus-stack).
+adopt_prometheus_crds() {
+    adopt_crds_for_release "Prometheus operator" 'monitoring\.coreos\.com' "last9-k8s-monitoring"
 }
 
 # Function to install OpenTelemetry Operator
@@ -1880,6 +1909,12 @@ setup_last9_monitoring() {
     if detect_existing_prometheus_operator; then
         operator_flag="--set prometheusOperator.enabled=false"
     fi
+
+    # Adopt any pre-existing Prometheus operator CRDs (monitoring.coreos.com)
+    # into the last9-k8s-monitoring release before Helm tries to manage them.
+    # This prevents Helm v4 SSA field-manager conflicts (e.g. CRDs owned by
+    # kubectl-client-side-apply or terraform-provider-helm).
+    adopt_prometheus_crds
 
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
