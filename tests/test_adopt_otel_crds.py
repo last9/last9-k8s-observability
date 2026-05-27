@@ -33,7 +33,15 @@ MOCK_KUBECTL = textwrap.dedent("""\
         *"metadata.annotations.meta"*)
             [ "$SCENARIO" = "already_owned" ] && echo "opentelemetry-operator" || echo ""
             ;;
+        *"-o yaml"*)
+            # Live CRD YAML piped into the migration apply
+            echo "apiVersion: apiextensions.k8s.io/v1"
+            echo "kind: CustomResourceDefinition"
+            ;;
         "label --overwrite"*|"annotate --overwrite"*)
+            exit 0
+            ;;
+        "apply --server-side"*)
             exit 0
             ;;
         *)
@@ -131,6 +139,30 @@ class TestAdoptOtelCRDs(unittest.TestCase):
             all("meta.helm.sh/release-namespace=last9" in c for c in annotate_calls),
             f"Expected release-namespace annotation: {annotate_calls}",
         )
+
+    def test_unowned_crds_migrate_field_manager(self):
+        """Unowned CRDs get re-applied via server-side apply with --force-conflicts
+        and --field-manager=helm, so Helm v4 SSA can claim field ownership."""
+        calls = run_adopt("unowned_crds")
+        apply_calls = [c for c in calls if c.startswith("apply --server-side")]
+        self.assertEqual(
+            len(apply_calls), 2,
+            f"Expected 2 server-side apply migration calls, got {len(apply_calls)}: {apply_calls}",
+        )
+        self.assertTrue(
+            all("--force-conflicts" in c for c in apply_calls),
+            f"Migration must use --force-conflicts: {apply_calls}",
+        )
+        self.assertTrue(
+            all("--field-manager=helm" in c for c in apply_calls),
+            f"Migration must use --field-manager=helm: {apply_calls}",
+        )
+
+    def test_already_owned_crds_no_migration(self):
+        """Already-owned CRDs are not re-applied (no SSA migration)."""
+        calls = run_adopt("already_owned")
+        apply_calls = [c for c in calls if c.startswith("apply --server-side")]
+        self.assertEqual(len(apply_calls), 0, f"Should not migrate owned CRDs: {apply_calls}")
 
     def test_already_owned_crds_not_patched(self):
         """CRDs already owned by correct Helm release are not re-patched."""

@@ -91,7 +91,7 @@ check_yq_available() {
         log_warn "⚠ yq not found - using awk/sed fallback for YAML parsing"
         log_warn "  For better reliability, install yq:"
         log_warn "  - macOS: brew install yq"
-        log_warn "  - Linux: wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq"
+        log_warn "  - Linux: download yq for your arch (yq_linux_amd64 or yq_linux_arm64) from https://github.com/mikefarah/yq/releases/latest, then chmod +x and place on PATH"
     fi
 }
 
@@ -1431,9 +1431,19 @@ setup_helm_repos() {
 }
 
 # Adopt pre-existing OTel CRDs into this Helm release so that
-# "helm upgrade --install" does not fail with ownership metadata errors.
-# This happens when CRDs were previously installed by a different release
-# name/namespace or directly via kubectl apply.
+# "helm upgrade --install" does not fail.
+#
+# Two distinct failures are handled:
+#   1. Helm v3-style ownership check: CRDs without the
+#      app.kubernetes.io/managed-by=Helm label and meta.helm.sh/release-*
+#      annotations are rejected ("cannot be imported into the current release").
+#      Fixed by patching the labels/annotations.
+#   2. Helm v4 server-side-apply field-manager conflict: CRDs created via
+#      "kubectl apply" are owned by the "kubectl-client-side-apply" field
+#      manager, and Helm v4's SSA refuses to overwrite their fields
+#      (.spec.versions, annotations). Fixed by re-applying each CRD with
+#      "kubectl apply --server-side --force-conflicts --field-manager=helm",
+#      which migrates field ownership to Helm's field manager.
 adopt_otel_crds() {
     local release_name="opentelemetry-operator"
     local release_ns="$NAMESPACE"
@@ -1457,11 +1467,20 @@ adopt_otel_crds() {
 
         if [ "$managed_by" != "Helm" ] || [ "$rel_name" != "$release_name" ]; then
             log_info "Adopting CRD into Helm release: $crd"
+
+            # (1) Helm ownership metadata
             kubectl label --overwrite "$crd" \
                 "app.kubernetes.io/managed-by=Helm" 2>/dev/null || true
             kubectl annotate --overwrite "$crd" \
                 "meta.helm.sh/release-name=$release_name" \
                 "meta.helm.sh/release-namespace=$release_ns" 2>/dev/null || true
+
+            # (2) Migrate field-manager ownership for Helm v4 server-side apply.
+            # Re-apply the live CRD as field-manager "helm" with --force-conflicts
+            # so Helm's subsequent SSA does not conflict with kubectl-client-side-apply.
+            kubectl get "$crd" -o yaml 2>/dev/null \
+                | kubectl apply --server-side --force-conflicts --field-manager=helm -f - >/dev/null 2>&1 || true
+
             adopted=$((adopted + 1))
         fi
     done <<< "$crds"
