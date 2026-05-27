@@ -91,7 +91,7 @@ check_yq_available() {
         log_warn "⚠ yq not found - using awk/sed fallback for YAML parsing"
         log_warn "  For better reliability, install yq:"
         log_warn "  - macOS: brew install yq"
-        log_warn "  - Linux: wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && chmod +x /usr/local/bin/yq"
+        log_warn "  - Linux: download yq for your arch (yq_linux_amd64 or yq_linux_arm64) from https://github.com/mikefarah/yq/releases/latest, then chmod +x and place on PATH"
     fi
 }
 
@@ -1430,9 +1430,103 @@ setup_helm_repos() {
     log_info "Helm repositories updated!"
 }
 
+# Adopt pre-existing OTel CRDs into this Helm release so that
+# "helm upgrade --install" does not fail.
+#
+# Two distinct failures are handled:
+#   1. Helm v3-style ownership check: CRDs without the
+#      app.kubernetes.io/managed-by=Helm label and meta.helm.sh/release-*
+#      annotations are rejected ("cannot be imported into the current release").
+#      Fixed by patching the labels/annotations.
+#   2. Helm v4 server-side-apply field-manager conflict: CRDs created via
+#      "kubectl apply" are owned by the "kubectl-client-side-apply" field
+#      manager, and Helm v4's SSA refuses to overwrite their fields
+#      (.spec.versions, annotations). Fixed by re-applying each CRD with
+#      "kubectl apply --server-side --force-conflicts --field-manager=helm",
+#      which migrates field ownership to Helm's field manager.
+# Generic CRD adoption: claim pre-existing CRDs matching a grep pattern into a
+# target Helm release. Handles BOTH the Helm v3-style ownership check (label +
+# annotations) AND the Helm v4 server-side-apply field-manager conflict
+# (re-apply as field-manager "helm" with --force-conflicts).
+#
+# Args:
+#   $1 - human-readable group label for log messages (e.g. "OpenTelemetry")
+#   $2 - grep pattern matched against `kubectl get crd -o name` output
+#        (e.g. '\.opentelemetry\.io' or 'monitoring\.coreos\.com')
+#   $3 - target Helm release name to claim ownership for
+# The target release namespace is always "$NAMESPACE".
+adopt_crds_for_release() {
+    local group_label="$1"
+    local crd_pattern="$2"
+    local release_name="$3"
+    local release_ns="$NAMESPACE"
+
+    log_info "Checking for pre-existing ${group_label} CRDs to adopt..."
+
+    local crds
+    crds=$(kubectl get crd -o name 2>/dev/null | grep "$crd_pattern" || true)
+
+    if [ -z "$crds" ]; then
+        log_info "No existing ${group_label} CRDs found, skipping adoption."
+        return 0
+    fi
+
+    local adopted=0
+    while IFS= read -r crd; do
+        [ -z "$crd" ] && continue
+        local managed_by
+        managed_by=$(kubectl get "$crd" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+        local rel_name
+        rel_name=$(kubectl get "$crd" -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}' 2>/dev/null || true)
+
+        if [ "$managed_by" != "Helm" ] || [ "$rel_name" != "$release_name" ]; then
+            log_info "Adopting CRD into Helm release: $crd"
+
+            # (1) Helm ownership metadata
+            kubectl label --overwrite "$crd" \
+                "app.kubernetes.io/managed-by=Helm" 2>/dev/null || true
+            kubectl annotate --overwrite "$crd" \
+                "meta.helm.sh/release-name=$release_name" \
+                "meta.helm.sh/release-namespace=$release_ns" 2>/dev/null || true
+
+            # (2) Migrate field-manager ownership for Helm v4 server-side apply.
+            # Re-apply the live CRD as field-manager "helm" with --force-conflicts
+            # so Helm's subsequent SSA does not conflict with kubectl-client-side-apply
+            # or terraform-provider-helm.
+            kubectl get "$crd" -o yaml 2>/dev/null \
+                | kubectl apply --server-side --force-conflicts --field-manager=helm -f - >/dev/null 2>&1 || true
+
+            adopted=$((adopted + 1))
+        fi
+    done <<< "$crds"
+
+    if [ "$adopted" -gt 0 ]; then
+        log_info "✓ Adopted $adopted ${group_label} CRD(s) into Helm release '$release_name' in namespace '$release_ns'"
+    else
+        log_info "✓ All existing ${group_label} CRDs already owned by correct Helm release"
+    fi
+}
+
+# Adopt pre-existing OpenTelemetry CRDs (suffix .opentelemetry.io) into the
+# "opentelemetry-operator" Helm release. Thin wrapper over adopt_crds_for_release.
+adopt_otel_crds() {
+    adopt_crds_for_release "OpenTelemetry" '\.opentelemetry\.io' "opentelemetry-operator"
+}
+
+# Adopt pre-existing Prometheus operator CRDs (suffix monitoring.coreos.com)
+# into the "last9-k8s-monitoring" Helm release. Thin wrapper over
+# adopt_crds_for_release. The release name MUST match the helm release used in
+# setup_last9_monitoring (last9-k8s-monitoring / kube-prometheus-stack).
+adopt_prometheus_crds() {
+    adopt_crds_for_release "Prometheus operator" 'monitoring\.coreos\.com' "last9-k8s-monitoring"
+}
+
 # Function to install OpenTelemetry Operator
 install_operator() {
     log_info "Installing OpenTelemetry Operator..."
+
+    # Adopt any pre-existing OTel CRDs before Helm tries to manage them
+    adopt_otel_crds
 
     # Build helm command as array for proper argument handling
     local helm_args=(
@@ -1815,6 +1909,12 @@ setup_last9_monitoring() {
     if detect_existing_prometheus_operator; then
         operator_flag="--set prometheusOperator.enabled=false"
     fi
+
+    # Adopt any pre-existing Prometheus operator CRDs (monitoring.coreos.com)
+    # into the last9-k8s-monitoring release before Helm tries to manage them.
+    # This prevents Helm v4 SSA field-manager conflicts (e.g. CRDs owned by
+    # kubectl-client-side-apply or terraform-provider-helm).
+    adopt_prometheus_crds
 
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
@@ -2597,6 +2697,7 @@ main() {
 # Handle script interruption and cleanup
 trap cleanup EXIT INT TERM
 
-# Run main function
-main "$@"
+# Run main function when executed directly (not sourced for testing).
+# The || true prevents set -e from exiting when condition is false (sourced context).
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@" || true
 
