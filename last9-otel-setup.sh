@@ -1914,6 +1914,17 @@ setup_last9_monitoring() {
     # into the last9-k8s-monitoring release before Helm tries to manage them.
     # This prevents Helm v4 SSA field-manager conflicts (e.g. CRDs owned by
     # kubectl-client-side-apply or terraform-provider-helm).
+    #
+    # When CRDs already exist (e.g. installed by Terraform), SSA field-manager
+    # migration via --force-conflicts can silently fail if the existing manager
+    # holds conflicting entries. In that case Helm's CRD installer still errors.
+    # The safest fix: skip CRD installation entirely when CRDs are pre-existing
+    # (they stay in place; Helm only needs to own the release resources).
+    local skip_crds_flag=""
+    if kubectl get crd alertmanagerconfigs.monitoring.coreos.com &>/dev/null 2>&1; then
+        log_info "Pre-existing Prometheus CRDs detected — will pass --skip-crds to avoid field-manager conflicts"
+        skip_crds_flag="--skip-crds"
+    fi
     adopt_prometheus_crds
 
     # Install/upgrade the monitoring stack
@@ -1924,7 +1935,8 @@ setup_last9_monitoring() {
         -f k8s-monitoring-values.yaml \
         --create-namespace \
         $HELM_SCHEMA_FLAG \
-        $operator_flag
+        $operator_flag \
+        $skip_crds_flag
 
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 
