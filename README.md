@@ -68,7 +68,16 @@ For log collection use cases:
 
 ### Option 4: Metrics Only (Kubernetes Monitoring)
 
-For cluster metrics and monitoring:
+For cluster metrics and monitoring. This is a fully standalone path — no prior install steps needed.
+
+**Step 1 — Download the script** (skip if you already have it):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-otel-setup.sh \
+  -o last9-otel-setup.sh && chmod +x last9-otel-setup.sh
+```
+
+**Step 2 — Run monitoring-only install:**
 
 ```bash
 ./last9-otel-setup.sh monitoring-only \
@@ -76,6 +85,27 @@ For cluster metrics and monitoring:
   username="<your-username>" \
   password="<your-password>"
 ```
+
+**What gets installed** (in the `last9` namespace):
+
+| Component | Purpose |
+|-----------|---------|
+| kube-prometheus-stack | Prometheus Operator + AlertManager |
+| PrometheusAgent | Scrapes cluster metrics, remote-writes to Last9 |
+| kube-state-metrics | Kubernetes object state metrics |
+| node-exporter | Per-node CPU/memory/disk metrics |
+
+**Verify the install:**
+
+```bash
+kubectl get pods -n last9
+kubectl get prometheusagent -n last9
+kubectl get secrets -n last9 last9-remote-write-secret
+```
+
+> **Pre-existing Prometheus CRDs (Terraform / prior Helm installs)**
+>
+> If your cluster already has `monitoring.coreos.com` CRDs managed by Terraform or another Helm release, the script detects this automatically and handles the conflict by upgrading CRD schemas to the required version and skipping conflicting CRD installation steps. No manual intervention needed.
 
 ### Option 5: Kubernetes Events Only
 
@@ -90,6 +120,26 @@ For Kubernetes events collection:
 
 ## Advanced Configuration
 
+### Specify kubectl Context (Multi-Cluster)
+
+On shared machines with multiple clusters, pass `context=` to pin all operations to a specific kubectl context. Without it, the current active context is used — which could change mid-install on shared instances.
+
+```bash
+./last9-otel-setup.sh monitoring-only \
+  context="prod-us-east-1" \
+  monitoring-endpoint="..." \
+  username="..." \
+  password="..."
+```
+
+Works with all install modes (`monitoring-only`, `logs-only`, `operator-only`, `events-only`, full install, uninstall). All `kubectl` and `helm` calls use the specified context.
+
+List available contexts:
+
+```bash
+kubectl config get-contexts
+```
+
 ### Override Cluster Name
 
 ```bash
@@ -99,7 +149,7 @@ For Kubernetes events collection:
   cluster="prod-us-east-1"
 ```
 
-If not provided, the cluster name is auto-detected from `kubectl config current-context`.
+If not provided, the cluster name is auto-detected from `kubectl config current-context` (or from `context=` if that was passed).
 
 ### Set Deployment Environment
 

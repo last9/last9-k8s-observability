@@ -57,6 +57,7 @@ EVENTS_ONLY=false
 TOLERATIONS_FILE=""
 USE_YQ=false
 DEPLOYMENT_ENV=""
+KUBE_CONTEXT=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -74,6 +75,7 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
+    exit 1
 }
 
 # Helper function to escape special characters for sed
@@ -93,6 +95,57 @@ check_yq_available() {
         log_warn "  - macOS: brew install yq"
         log_warn "  - Linux: download yq for your arch (yq_linux_amd64 or yq_linux_arm64) from https://github.com/mikefarah/yq/releases/latest, then chmod +x and place on PATH"
     fi
+}
+
+# Extract a human-readable cluster name from a raw kubectl context string.
+# EKS contexts are ARNs: arn:aws:eks:<region>:<account>:cluster/<name>
+# GKE contexts: gke_<project>_<region>_<name>  — returned as-is (already readable)
+# Plain names are returned unchanged.
+sanitize_cluster_name() {
+    local raw="$1"
+    if echo "$raw" | grep -q "^arn:"; then
+        # Extract the segment after the last /
+        echo "$raw" | sed 's|.*/||'
+    else
+        echo "$raw"
+    fi
+}
+
+# Detect host CPU architecture and package manager for EC2 binary installs.
+# Sets HOST_ARCH (amd64|arm64) and HOST_PKG (deb|rpm) with matching
+# HOST_PKG_CMD (dpkg -i|rpm -ivh) and HOST_PKG_EXT (.deb|.rpm).
+HOST_ARCH=""
+HOST_PKG=""
+HOST_PKG_CMD=""
+HOST_PKG_EXT=""
+detect_host_platform() {
+    local raw_arch
+    raw_arch=$(uname -m 2>/dev/null || echo "x86_64")
+    case "$raw_arch" in
+        aarch64|arm64) HOST_ARCH="arm64" ;;
+        x86_64|amd64)  HOST_ARCH="amd64" ;;
+        *)
+            log_warn "Unknown CPU architecture '$raw_arch' — defaulting to amd64"
+            HOST_ARCH="amd64"
+            ;;
+    esac
+
+    if command -v apt-get >/dev/null 2>&1; then
+        HOST_PKG="deb"
+        HOST_PKG_CMD="dpkg -i"
+        HOST_PKG_EXT=".deb"
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        HOST_PKG="rpm"
+        HOST_PKG_CMD="rpm -ivh"
+        HOST_PKG_EXT=".rpm"
+    else
+        log_warn "Could not detect package manager — defaulting to deb"
+        HOST_PKG="deb"
+        HOST_PKG_CMD="dpkg -i"
+        HOST_PKG_EXT=".deb"
+    fi
+
+    log_info "Host platform: arch=${HOST_ARCH} pkg=${HOST_PKG}"
 }
 
 # Detect Helm major version and set schema validation flag
@@ -118,12 +171,10 @@ load_tolerations_from_file() {
     # Validate file exists and is readable
     if [ ! -f "$file_path" ]; then
         log_error "Tolerations file not found: $file_path"
-        exit 1
     fi
 
     if [ ! -r "$file_path" ]; then
         log_error "Tolerations file is not readable: $file_path"
-        exit 1
     fi
 
     # Check for yq
@@ -854,6 +905,9 @@ parse_arguments() {
             cluster=*)
                 CLUSTER_NAME="${arg#*=}"
                 ;;
+            context=*)
+                KUBE_CONTEXT="${arg#*=}"
+                ;;
             username=*)
                 LAST9_USERNAME="${arg#*=}"
                 ;;
@@ -867,7 +921,6 @@ parse_arguments() {
                 if [ -z "$TOLERATIONS_FILE" ]; then
                     log_error "tolerations-file argument is empty. Please provide an absolute path to the tolerations YAML file."
                     log_error "Example: tolerations-file=/absolute/path/to/tolerations.yaml"
-                    exit 1
                 fi
 
                 # Check if path is absolute (starts with /)
@@ -875,21 +928,18 @@ parse_arguments() {
                     log_error "tolerations-file must be an absolute path (starting with /)"
                     log_error "Provided: $TOLERATIONS_FILE"
                     log_error "Example: tolerations-file=/home/user/tolerations.yaml"
-                    exit 1
                 fi
 
                 # Check if file exists
                 if [ ! -f "$TOLERATIONS_FILE" ]; then
                     log_error "Tolerations file not found at: $TOLERATIONS_FILE"
                     log_error "Please verify the file path and try again."
-                    exit 1
                 fi
 
                 # Check if file is readable
                 if [ ! -r "$TOLERATIONS_FILE" ]; then
                     log_error "Tolerations file is not readable: $TOLERATIONS_FILE"
                     log_error "Please check file permissions and try again."
-                    exit 1
                 fi
 
                 log_info "✓ Tolerations file validated: $TOLERATIONS_FILE"
@@ -955,6 +1005,11 @@ show_help() {
     echo "                           If not provided, automatically detected from kubectl current-context"
     echo "                           Example: cluster=prod-us-east-1"
     echo ""
+    echo "  context=CONTEXT_NAME     Use a specific kubectl context for all operations"
+    echo "                           Useful on shared machines with multiple clusters"
+    echo "                           If not provided, the current active context is used"
+    echo "                           Example: context=prod-us-east-1"
+    echo ""
     echo "  tolerations-file=FILE    Apply Kubernetes tolerations and nodeSelector from YAML file"
     echo "                           Allows running components on tainted nodes (e.g., monitoring nodes, control-plane)"
     echo "                           See examples/ directory for sample configurations"
@@ -979,6 +1034,26 @@ show_help() {
     echo "  # Run on spot/preemptible instances"
     echo "  $0 tolerations-file=examples/tolerations-spot-instances.yaml monitoring-only monitoring-endpoint=\"xxx\" ..."
     echo ""
+}
+
+# Install kubectl/helm wrappers that inject --context/--kube-context when
+# context= argument is provided. Shadowing the binaries means all existing
+# calls throughout the script pick up the context automatically.
+setup_context_wrappers() {
+    if [ -z "$KUBE_CONTEXT" ]; then
+        return 0
+    fi
+
+    # Validate context exists before wrapping
+    if ! command kubectl config get-contexts "$KUBE_CONTEXT" >/dev/null 2>&1; then
+        log_error "kubectl context '$KUBE_CONTEXT' not found. Run 'kubectl config get-contexts' to list available contexts."
+    fi
+
+    log_info "Using kubectl context: $KUBE_CONTEXT"
+
+    kubectl() { command kubectl --context "$KUBE_CONTEXT" "$@"; }
+    helm()    { command helm --kube-context "$KUBE_CONTEXT" "$@"; }
+    export -f kubectl helm
 }
 
 # Function to check prerequisites
@@ -1021,15 +1096,15 @@ check_prerequisites() {
         exit 1
     fi
     
-    command -v helm >/dev/null 2>&1 || { log_error "helm is required but not installed. Aborting."; exit 1; }
-    command -v kubectl >/dev/null 2>&1 || { log_error "kubectl is required but not installed. Aborting."; exit 1; }
+    command -v helm >/dev/null 2>&1 || log_error "helm is required but not installed. Aborting."
+    command -v kubectl >/dev/null 2>&1 || log_error "kubectl is required but not installed. Aborting."
     
     if [ "$UNINSTALL_MODE" = false ]; then
-        command -v git >/dev/null 2>&1 || { log_error "git is required but not installed. Aborting."; exit 1; }
+        command -v git >/dev/null 2>&1 || log_error "git is required but not installed. Aborting."
     fi
     
     # Check kubectl connectivity
-    kubectl cluster-info >/dev/null 2>&1 || { log_error "kubectl cannot connect to cluster. Aborting."; exit 1; }
+    kubectl cluster-info >/dev/null 2>&1 || log_error "kubectl cannot connect to cluster. Aborting."
     
     log_info "Prerequisites check passed!"
     
@@ -1076,7 +1151,6 @@ setup_repository() {
     for file in "${required_files[@]}"; do
         if [ ! -f "$file" ]; then
             log_error "Required file '$file' not found in repository."
-            exit 1
         fi
     done
 
@@ -1108,7 +1182,6 @@ update_auth_token() {
     # Check if the values file exists
     if [ ! -f "last9-otel-collector-values.yaml" ]; then
         log_error "last9-otel-collector-values.yaml not found!"
-        exit 1
     fi
     
     # Create backup of original file
@@ -1155,7 +1228,6 @@ update_otel_endpoint() {
     # Check if the values file exists
     if [ ! -f "last9-otel-collector-values.yaml" ]; then
         log_error "last9-otel-collector-values.yaml not found!"
-        exit 1
     fi
     
     # Create backup of original file (if not already created by update_auth_token)
@@ -1260,9 +1332,12 @@ update_cluster_name_attribute() {
 
     if [ -z "$cluster_name" ]; then
         log_info "Cluster name not provided, attempting to detect from kubectl..."
-        cluster_name=$(kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+        local raw_context
+        raw_context=$(kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+        cluster_name=$(sanitize_cluster_name "$raw_context")
         log_info "Detected cluster name: $cluster_name"
     else
+        cluster_name=$(sanitize_cluster_name "$cluster_name")
         log_info "Using provided cluster name: $cluster_name"
     fi
 
@@ -1314,9 +1389,12 @@ update_events_agent_cluster_name() {
 
     if [ -z "$cluster_name" ]; then
         log_info "Cluster name not provided, attempting to detect from kubectl..."
-        cluster_name=$(kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+        local raw_context
+        raw_context=$(kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+        cluster_name=$(sanitize_cluster_name "$raw_context")
         log_info "Detected cluster name: $cluster_name"
     else
+        cluster_name=$(sanitize_cluster_name "$cluster_name")
         log_info "Using provided cluster name: $cluster_name"
     fi
 
@@ -1366,7 +1444,6 @@ update_monitoring_endpoint() {
     # Check if the values file exists
     if [ ! -f "k8s-monitoring-values.yaml" ]; then
         log_error "k8s-monitoring-values.yaml not found!"
-        exit 1
     fi
     
     # Create backup of original file (if not already created)
@@ -1493,8 +1570,14 @@ adopt_crds_for_release() {
             # Re-apply the live CRD as field-manager "helm" with --force-conflicts
             # so Helm's subsequent SSA does not conflict with kubectl-client-side-apply
             # or terraform-provider-helm.
-            kubectl get "$crd" -o yaml 2>/dev/null \
-                | kubectl apply --server-side --force-conflicts --field-manager=helm -f - >/dev/null 2>&1 || true
+            local ssa_output
+            ssa_output=$(kubectl get "$crd" -o yaml 2>/dev/null \
+                | kubectl apply --server-side --force-conflicts --field-manager=helm -f - 2>&1) || true
+            if [ -n "$ssa_output" ]; then
+                while IFS= read -r line; do
+                    [ -n "$line" ] && log_warn "CRD SSA: $line"
+                done <<< "$ssa_output"
+            fi
 
             adopted=$((adopted + 1))
         fi
@@ -1571,7 +1654,9 @@ install_operator() {
     fi
 
     # Execute helm command
-    helm "${helm_args[@]}"
+    if ! helm "${helm_args[@]}"; then
+        log_error "Helm install/upgrade failed for opentelemetry-operator. See output above."
+    fi
 
     log_info "OpenTelemetry Operator installed!"
 
@@ -1587,7 +1672,6 @@ update_deployment_mode() {
     # Check if the values file exists
     if [ ! -f "last9-otel-collector-values.yaml" ]; then
         log_error "last9-otel-collector-values.yaml not found!"
-        exit 1
     fi
     
     # Create backup of original file
@@ -1643,12 +1727,14 @@ install_collector() {
         log_info "Using custom values file: $values_file"
     fi
     
-    helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
         -n "$NAMESPACE" \
         --create-namespace \
         -f "$values_file" \
-        $HELM_SCHEMA_FLAG
+        $HELM_SCHEMA_FLAG; then
+        log_error "Helm install/upgrade failed for last9-opentelemetry-collector. See output above."
+    fi
 
     log_info "OpenTelemetry Collector installed!"
 }
@@ -1825,7 +1911,6 @@ setup_last9_monitoring() {
     
     if [ -z "$cluster_name" ]; then
         log_error "Cluster name is required. Please provide cluster=<cluster-name>"
-        exit 1
     fi
     
     log_info "Using cluster name: $cluster_name"
@@ -1834,7 +1919,6 @@ setup_last9_monitoring() {
     if [ -z "$LAST9_USERNAME" ] || [ -z "$LAST9_PASSWORD" ]; then
         log_error "Last9 credentials are required for monitoring setup."
         log_error "Please provide username=<value> and password=<value> parameters."
-        exit 1
     fi
     
     local username="$LAST9_USERNAME"
@@ -1860,7 +1944,6 @@ setup_last9_monitoring() {
     # Check if k8s-monitoring-values.yaml exists
     if [ ! -f "k8s-monitoring-values.yaml" ]; then
         log_error "k8s-monitoring-values.yaml not found in current directory"
-        exit 1
     fi
     
     # Create backup of original file
@@ -1937,14 +2020,16 @@ setup_last9_monitoring() {
 
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
-    helm upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+    if ! helm upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
         --version "$MONITORING_VERSION" \
         -n "$NAMESPACE" \
         -f k8s-monitoring-values.yaml \
         --create-namespace \
         $HELM_SCHEMA_FLAG \
         $operator_flag \
-        $skip_crds_flag
+        $skip_crds_flag; then
+        log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
+    fi
 
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 
@@ -2051,7 +2136,6 @@ install_events_agent() {
     # Check if last9-kube-events-agent-values.yaml exists
     if [ ! -f "last9-kube-events-agent-values.yaml" ]; then
         log_error "last9-kube-events-agent-values.yaml not found in current directory"
-        exit 1
     fi
 
     # Update auth token and endpoint in events agent values file
@@ -2063,12 +2147,14 @@ install_events_agent() {
 
     # Install/upgrade the events agent
     log_info "Installing/upgrading Last9 Kubernetes Events Agent..."
-    helm upgrade --install last9-kube-events-agent open-telemetry/opentelemetry-collector \
+    if ! helm upgrade --install last9-kube-events-agent open-telemetry/opentelemetry-collector \
         --version 0.125.0 \
         -n "$NAMESPACE" \
         --create-namespace \
         -f last9-kube-events-agent-values.yaml \
-        $HELM_SCHEMA_FLAG
+        $HELM_SCHEMA_FLAG; then
+        log_error "Helm install/upgrade failed for last9-kube-events-agent. See output above."
+    fi
 
     log_info "✓ Last9 Kubernetes Events Agent deployed successfully!"
 
@@ -2438,7 +2524,10 @@ main() {
     
     # Parse command line arguments
     parse_arguments "$@"
-    
+
+    # Install kubectl/helm context wrappers if context= was provided
+    setup_context_wrappers
+
     # Check prerequisites
     check_prerequisites
     
@@ -2481,12 +2570,10 @@ main() {
             install_collector)
                 if [ -z "$AUTH_TOKEN" ]; then
                     log_error "Token is required for install_collector function"
-                    exit 1
                 fi
                 
                 if [ -z "$OTEL_ENDPOINT" ]; then
                     log_error "OTEL endpoint is required for install_collector function"
-                    exit 1
                 fi
                 setup_helm_repos
                 if [ -n "$VALUES_FILE" ]; then
@@ -2494,17 +2581,18 @@ main() {
                     # Check if values file exists in current directory
                     if [ ! -f "$VALUES_FILE" ]; then
                         log_error "Values file '$VALUES_FILE' not found in current directory"
-                        exit 1
                     fi
                     
                     # For individual function calls with custom values, use as-is (no token replacement)
                     log_info "Using values file as-is for individual function call"
-                    helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+                    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
                         --create-namespace \
                         -f "$VALUES_FILE" \
-                        $HELM_SCHEMA_FLAG
+                        $HELM_SCHEMA_FLAG; then
+                        log_error "Helm install/upgrade failed for last9-opentelemetry-collector. See output above."
+                    fi
                 else
                     # Use default behavior - clone repo and use default values file with token replacement
                     setup_repository
@@ -2539,9 +2627,8 @@ main() {
                 uninstall_all
                 ;;
             *)
-                log_error "Unknown function: $FUNCTION_TO_EXECUTE"
                 echo "Available functions: setup_helm_repos, install_operator, install_collector, create_collector_service, create_instrumentation, verify_installation, setup_last9_monitoring, install_events_agent, uninstall_last9_monitoring, uninstall_events_agent, uninstall_all"
-                exit 1
+                log_error "Unknown function: $FUNCTION_TO_EXECUTE"
                 ;;
         esac
         
@@ -2557,19 +2644,23 @@ main() {
         if [ -z "$LAST9_USERNAME" ] || [ -z "$LAST9_PASSWORD" ]; then
             log_error "Last9 credentials are required for monitoring setup."
             log_error "Please provide username=<value> and password=<value> parameters."
-            exit 1
         fi
         
         if [ -z "$MONITORING_ENDPOINT" ]; then
             log_error "Monitoring endpoint is required for monitoring setup."
             log_error "Please provide monitoring-endpoint=<value> parameter."
-            exit 1
         fi
         
         # Check if cluster name is provided
         if [ -z "$CLUSTER_NAME" ]; then
             log_info "Cluster name not provided, attempting to detect from kubectl..."
-            CLUSTER_NAME=$(kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+            local raw_ctx
+            if [ -n "$KUBE_CONTEXT" ]; then
+                raw_ctx="$KUBE_CONTEXT"
+            else
+                raw_ctx=$(command kubectl config current-context 2>/dev/null || echo "unknown-cluster")
+            fi
+            CLUSTER_NAME=$(sanitize_cluster_name "$raw_ctx")
             log_info "Detected cluster name: $CLUSTER_NAME"
         fi
         
@@ -2641,13 +2732,11 @@ main() {
         if [ -z "$AUTH_TOKEN" ]; then
             log_error "Auth token is required for collector installation."
             log_error "Please provide token=<value> parameter for operator-only installation."
-            exit 1
         fi
         
         if [ -z "$OTEL_ENDPOINT" ]; then
             log_error "OTEL endpoint is required for collector installation."
             log_error "Please provide endpoint=<value> parameter for operator-only installation."
-            exit 1
         fi
         
         setup_repository
