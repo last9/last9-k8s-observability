@@ -1922,7 +1922,15 @@ setup_last9_monitoring() {
     # (they stay in place; Helm only needs to own the release resources).
     local skip_crds_flag=""
     if kubectl get crd alertmanagerconfigs.monitoring.coreos.com &>/dev/null 2>&1; then
-        log_info "Pre-existing Prometheus CRDs detected — will pass --skip-crds to avoid field-manager conflicts"
+        log_info "Pre-existing Prometheus CRDs detected — upgrading schemas to chart version before install"
+        # Terraform-managed CRDs may be older than the chart expects. Apply the
+        # chart's CRD manifests directly with --force-conflicts so the schemas are
+        # updated to the version the chart requires (e.g. PrometheusAgent.spec.tsdb,
+        # ServiceMonitor trackTimestampsStaleness) without removing the CRDs.
+        helm show crds prometheus-community/kube-prometheus-stack \
+            --version "$MONITORING_VERSION" 2>/dev/null \
+            | kubectl apply --server-side --force-conflicts \
+              --field-manager=helm -f - 2>&1 | grep -v "^$" || true
         skip_crds_flag="--skip-crds"
     fi
     adopt_prometheus_crds
