@@ -317,3 +317,108 @@ SH
     [[ "$output" != *"should not reach here"* ]]
     rm -rf "$tmpdir"
 }
+
+# ---------------------------------------------------------------------------
+# inject_collector_tls_server_name / inject_monitoring_tls_server_name
+# ---------------------------------------------------------------------------
+
+collector_tls_func() {
+    awk '/^inject_collector_tls_server_name\(\)/,/^}/' "$SCRIPT"
+}
+monitoring_tls_func() {
+    awk '/^inject_monitoring_tls_server_name\(\)/,/^}/' "$SCRIPT"
+}
+
+@test "inject_collector_tls: adds tls block under otlp/last9 with correct indent" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/last9-otel-collector-values.yaml"
+    func_body=$(collector_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME='otlp.last9.io'
+        $func_body
+        inject_collector_tls_server_name last9-otel-collector-values.yaml
+        grep -n 'server_name_override' last9-otel-collector-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    # server_name_override child of tls, indented 8 spaces
+    [[ "$output" == *"        server_name_override: otlp.last9.io"* ]]
+    # exactly one tls block (decoy endpoint: lines must not be matched)
+    n=$(grep -c '^      tls:' "$tmpdir/last9-otel-collector-values.yaml")
+    [ "$n" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_monitoring_tls: adds tlsConfig.serverName under remoteWrite url" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(monitoring_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME='metrics.last9.io'
+        $func_body
+        inject_monitoring_tls_server_name
+        grep -n 'serverName' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    # serverName indented 10 spaces; tlsConfig at 8 spaces
+    [[ "$output" == *"          serverName: metrics.last9.io"* ]]
+    grep -q '^        tlsConfig:' "$tmpdir/k8s-monitoring-values.yaml"
+    rm -rf "$tmpdir"
+}
+
+@test "inject_collector_tls: no-op and byte-identical when SERVER_NAME empty" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/orig.yaml"
+    cp "$tmpdir/orig.yaml" "$tmpdir/last9-otel-collector-values.yaml"
+    func_body=$(collector_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME=''
+        $func_body
+        inject_collector_tls_server_name last9-otel-collector-values.yaml
+        diff orig.yaml last9-otel-collector-values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_collector_tls: idempotent on re-run (single block)" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/last9-otel-collector-values.yaml"
+    func_body=$(collector_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME='otlp.last9.io'
+        $func_body
+        inject_collector_tls_server_name last9-otel-collector-values.yaml
+        inject_collector_tls_server_name last9-otel-collector-values.yaml
+        grep -c 'server_name_override' last9-otel-collector-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tail -1)" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_monitoring_tls: no-op and byte-identical when SERVER_NAME empty" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    cp "$tmpdir/orig.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(monitoring_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME=''
+        $func_body
+        inject_monitoring_tls_server_name
+        diff orig.yaml k8s-monitoring-values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    rm -rf "$tmpdir"
+}
