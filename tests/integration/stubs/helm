@@ -5,6 +5,7 @@
 # Env flags:
 #   HELM_CALLS_LOG          file to append each call to (full arg string)
 #   SIMULATE_HELM_FAILURE   "1" → `helm upgrade --install` exits non-zero
+#   SIMULATE_INSTALLED      "1" → `helm list` reports the script's releases present
 #   MOCK_HELM_VERSION       version string for `helm version --short` (default v3.14.0)
 
 [ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
@@ -36,6 +37,18 @@ case "$cmd" in
         exit 0
         ;;
     "uninstall "*)
+        exit 0
+        ;;
+    "list "*)
+        # When releases are "installed", report them so uninstall paths take the
+        # real `helm uninstall` branch (the functions grep this output by name).
+        if [ "$SIMULATE_INSTALLED" = "1" ]; then
+            printf '%s\n' \
+                "last9-opentelemetry-collector" \
+                "opentelemetry-operator" \
+                "last9-k8s-monitoring" \
+                "last9-kube-events-agent"
+        fi
         exit 0
         ;;
     *)

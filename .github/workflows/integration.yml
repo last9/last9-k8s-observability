@@ -52,7 +52,9 @@ jobs:
             echo "$report" | grep -E "Functions:|Covered:|Line-weighted:|Directly tested:"
             echo '```'
             echo "Untested functions:"
-            echo "$report" | sed -n '/Untested (/,/^---/p' | grep '    - ' || true
+            echo "$report" | sed -n '/Untested (/,/^---/p' | grep '    - ' || echo "    (none)"
+            echo "Unreachable from main() — dead/unused:"
+            echo "$report" | sed -n '/Unreachable from main/,/^===/p' | grep '    - ' || echo "    (none)"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # Layer 2 — real kind cluster, one mode per matrix leg (parallel, isolated).

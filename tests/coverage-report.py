@@ -33,6 +33,7 @@ SCRIPT = os.path.join(REPO_ROOT, "last9-otel-setup.sh")
 TEST_FILES = [
     os.path.join(REPO_ROOT, "tests", "unit.bats"),
     os.path.join(REPO_ROOT, "tests", "integration", "orchestration.bats"),
+    os.path.join(REPO_ROOT, "tests", "integration", "uninstall.bats"),
     os.path.join(REPO_ROOT, "tests", "test_adopt_otel_crds.py"),
     os.path.join(REPO_ROOT, "tests", "test_adopt_prometheus_crds.py"),
 ]
@@ -118,7 +119,7 @@ def build_call_graph(funcs):
     # (?:start | separator | keyword) <spaces> NAME <word-boundary>
     patterns = {
         n: re.compile(
-            r"(?:^|[;&|(){}]|\b(?:then|do|else)\b)[ \t]*"
+            r"(?:^|[;&|(){}]|\b(?:if|elif|while|until|then|do|else)\b)[ \t]*"
             + re.escape(n)
             + r"(?![A-Za-z0-9_])",
             re.MULTILINE,

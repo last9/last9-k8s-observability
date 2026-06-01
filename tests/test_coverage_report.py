@@ -53,6 +53,15 @@ class TestCallGraph(unittest.TestCase):
         self.assertIn("b", graph["a"])      # after `then`
         self.assertIn("foo", graph["a"])    # multiline: leading command on its own line
 
+    def test_edge_when_called_as_if_condition(self):
+        # `if some_func; then` is a real call — the matcher must see it.
+        funcs = {
+            "a": (1, 4, ["a() {\n", "    if check; then echo ok; fi\n", "}\n"]),
+            "check": (5, 6, ["check() {\n", "}\n"]),
+        }
+        graph = cov.build_call_graph(funcs)
+        self.assertIn("check", graph["a"])
+
 
 class TestRealScript(unittest.TestCase):
     @classmethod
@@ -78,10 +87,11 @@ class TestRealScript(unittest.TestCase):
         self.assertIn("setup_last9_monitoring", self.covered)
         self.assertIn("install_collector", self.covered)
 
-    def test_uninstall_paths_are_untested(self):
-        # No automated test drives uninstall — main routes to it but is not traversed.
-        for fn in ("uninstall_all", "uninstall_opentelemetry"):
-            self.assertNotIn(fn, self.covered, f"{fn} should be reported untested")
+    def test_uninstall_paths_are_covered(self):
+        # uninstall.bats drives every uninstall path through the entry point.
+        for fn in ("uninstall_all", "uninstall_opentelemetry",
+                   "uninstall_last9_monitoring", "uninstall_events_agent"):
+            self.assertIn(fn, self.covered, f"{fn} should be covered by uninstall.bats")
 
     def test_main_is_counted_covered(self):
         self.assertIn("main", self.covered)
