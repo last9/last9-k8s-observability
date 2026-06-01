@@ -1738,6 +1738,34 @@ install_operator() {
     # Adopt any pre-existing OTel CRDs before Helm tries to manage them
     adopt_otel_crds
 
+    # When OTel CRDs already exist (e.g. a prior cert-manager-based install),
+    # cert-manager-cainjector owns .spec.conversion.webhook.clientConfig.caBundle
+    # via server-side apply and re-injects it continuously. Helm v4's SSA does
+    # NOT pass --force-conflicts, so its CRD apply fails fatally:
+    #   conflict with "cert-manager-cainjector" ... .caBundle
+    # The adoption migration above cannot win that race against an active
+    # controller.
+    #
+    # Unlike kube-prometheus-stack (CRDs in the chart's crds/ dir, so
+    # `helm show crds` + --skip-crds work), the opentelemetry-operator chart
+    # ships its CRDs as TEMPLATES gated by crds.create — `helm show crds` is
+    # empty and --skip-crds has NO effect. So instead: render the CRDs from the
+    # chart template and force-apply them out-of-band (upgrades schema to the
+    # chart version and forcibly takes field ownership from cainjector), then
+    # disable Helm's own CRD rendering with crds.create=false so Helm never
+    # applies — and never re-conflicts on — the CRDs.
+    local disable_crds=""
+    if kubectl get crd opentelemetrycollectors.opentelemetry.io &>/dev/null 2>&1; then
+        log_info "Pre-existing OpenTelemetry CRDs detected — force-applying chart CRDs and installing with crds.create=false"
+        helm template opentelemetry-operator open-telemetry/opentelemetry-operator \
+            --version "$OPERATOR_VERSION" --include-crds --set crds.create=true \
+            $HELM_SCHEMA_FLAG 2>/dev/null \
+            | awk 'BEGIN{RS="\n---\n"} /\nkind: CustomResourceDefinition/ || /^kind: CustomResourceDefinition/ {print "---"; print $0}' \
+            | kubectl apply --server-side --force-conflicts \
+              --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+        disable_crds="yes"
+    fi
+
     # Build helm command as array for proper argument handling
     local helm_args=(
         "upgrade" "--install"
@@ -1750,6 +1778,11 @@ install_operator() {
         "--set" "admissionWebhooks.certManager.enabled=false"
         "--set" "admissionWebhooks.autoGenerateCert.enabled=true"
     )
+
+    # Disable Helm's CRD rendering when CRDs were pre-existing (handled above)
+    if [ -n "$disable_crds" ]; then
+        helm_args+=("--set" "crds.create=false")
+    fi
 
     # Add tolerations and nodeSelector if provided
     if [ -n "$TOLERATIONS_FILE_PATH" ]; then
