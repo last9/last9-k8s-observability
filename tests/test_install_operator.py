@@ -40,6 +40,12 @@ MOCK_KUBECTL = textwrap.dedent("""\
         "get crd -o name")
             [ "$SCENARIO" = "no_crds" ] && exit 0
             printf 'crd/opentelemetrycollectors.opentelemetry.io\\n'
+            printf 'crd/instrumentations.opentelemetry.io\\n'
+            ;;
+        "apply --server-side"*)
+            # The out-of-band force-apply reads the filtered manifests on stdin.
+            # Capture them so a test can assert the awk filter passed CRDs only.
+            cat > "$MOCK_DIR/applied.yaml"
             ;;
         *"metadata.labels.app"*) echo "" ;;
         *"metadata.annotations.meta"*) echo "" ;;
@@ -51,19 +57,29 @@ MOCK_KUBECTL = textwrap.dedent("""\
     esac
 """)
 
-# Mock helm: record every invocation, succeed. `template` emits a CRD doc plus a
-# non-CRD doc, so the awk CRD-only filter in install_operator is exercised.
+# Mock helm: record every invocation, succeed. `template` emits Helm-realistic
+# multi-doc output — each doc prefixed with a `# Source:` comment, no leading
+# `---` on the first doc — so the awk CRD-only filter in install_operator is
+# tested against the actual shape `helm template --include-crds` produces, not a
+# sanitized one. Two CRDs + a Deployment, to prove the filter keeps both CRDs
+# and drops the Deployment.
 MOCK_HELM = textwrap.dedent("""\
     #!/bin/bash
     MOCK_DIR="$(cd "$(dirname "$0")" && pwd)"
     echo "helm $*" >> "$MOCK_DIR/calls.log"
     case "$*" in
         "template"*)
-            printf -- '---\\n'
+            printf -- '# Source: opentelemetry-operator/crds/crd-opentelemetrycollector.yaml\\n'
             printf 'apiVersion: apiextensions.k8s.io/v1\\n'
             printf 'kind: CustomResourceDefinition\\n'
             printf 'metadata:\\n  name: opentelemetrycollectors.opentelemetry.io\\n'
             printf -- '---\\n'
+            printf '# Source: opentelemetry-operator/crds/crd-instrumentation.yaml\\n'
+            printf 'apiVersion: apiextensions.k8s.io/v1\\n'
+            printf 'kind: CustomResourceDefinition\\n'
+            printf 'metadata:\\n  name: instrumentations.opentelemetry.io\\n'
+            printf -- '---\\n'
+            printf '# Source: opentelemetry-operator/templates/deployment.yaml\\n'
             printf 'apiVersion: apps/v1\\n'
             printf 'kind: Deployment\\n'
             printf 'metadata:\\n  name: opentelemetry-operator\\n'
@@ -81,8 +97,12 @@ RUNNER = textwrap.dedent("""\
 """)
 
 
-def run_install(scenario: str) -> list[str]:
-    """Run install_operator with mocked kubectl/helm/sleep, return all CLI calls."""
+def run_install(scenario: str) -> tuple[list[str], str]:
+    """Run install_operator with mocked kubectl/helm/sleep.
+
+    Returns (calls, applied) where `calls` is every recorded CLI invocation and
+    `applied` is the manifest stream the out-of-band force-apply received on
+    stdin (empty string if no force-apply ran)."""
     with tempfile.TemporaryDirectory() as mock_dir:
         with open(f"{mock_dir}/scenario", "w") as f:
             f.write(scenario)
@@ -117,12 +137,18 @@ def run_install(scenario: str) -> list[str]:
         with open(f"{mock_dir}/calls.log") as f:
             calls = f.read().splitlines()
 
+        applied = ""
+        applied_path = f"{mock_dir}/applied.yaml"
+        if os.path.exists(applied_path):
+            with open(applied_path) as f:
+                applied = f.read()
+
     if result.returncode != 0:
         raise RuntimeError(
             f"install_operator failed (exit {result.returncode})\n"
             f"stderr: {result.stderr[:500]}"
         )
-    return calls
+    return calls, applied
 
 
 class TestInstallOperator(unittest.TestCase):
@@ -131,7 +157,7 @@ class TestInstallOperator(unittest.TestCase):
         """The opentelemetry-operator chart ships CRDs as templates (not crds/),
         so they must be rendered with `helm template --include-crds`, NOT
         `helm show crds` (which is empty for this chart)."""
-        calls = run_install("crds_exist")
+        calls, _ = run_install("crds_exist")
         tmpl = [c for c in calls if c.startswith("helm template") and "--include-crds" in c]
         self.assertTrue(tmpl, f"Expected 'helm template --include-crds': {calls}")
         self.assertFalse(
@@ -142,7 +168,7 @@ class TestInstallOperator(unittest.TestCase):
     def test_preexisting_crds_applied_with_force_conflicts(self):
         """Rendered CRDs are force-applied out-of-band to steal caBundle ownership
         from cert-manager-cainjector and upgrade schema before Helm runs."""
-        calls = run_install("crds_exist")
+        calls, _ = run_install("crds_exist")
         force_applies = [
             c
             for c in calls
@@ -156,7 +182,7 @@ class TestInstallOperator(unittest.TestCase):
         """When OTel CRDs pre-exist, the helm install must pass crds.create=false
         (NOT --skip-crds, which is a no-op for template-rendered CRDs) so Helm
         does not re-conflict with cert-manager-cainjector on caBundle."""
-        calls = run_install("crds_exist")
+        calls, _ = run_install("crds_exist")
         install = [c for c in calls if c.startswith("helm upgrade --install")]
         self.assertEqual(len(install), 1, f"Expected one helm install: {install}")
         self.assertIn(
@@ -170,7 +196,7 @@ class TestInstallOperator(unittest.TestCase):
     def test_no_crds_helm_owns_crds(self):
         """When no OTel CRDs pre-exist, Helm installs CRDs itself — no
         crds.create=false and no out-of-band CRD render/apply."""
-        calls = run_install("no_crds")
+        calls, _ = run_install("no_crds")
         install = [c for c in calls if c.startswith("helm upgrade --install")]
         self.assertEqual(len(install), 1, f"Expected one helm install: {install}")
         self.assertNotIn(
@@ -180,6 +206,24 @@ class TestInstallOperator(unittest.TestCase):
         self.assertFalse(
             [c for c in calls if c.startswith("helm template")],
             f"No out-of-band CRD render when CRDs absent: {calls}",
+        )
+
+    def test_force_apply_receives_crds_only(self):
+        """The awk filter must isolate CRD docs from realistic `helm template`
+        output (each doc carries a `# Source:` comment) — every
+        CustomResourceDefinition is force-applied and the Deployment is dropped,
+        so the out-of-band apply never touches non-CRD manifests."""
+        _, applied = run_install("crds_exist")
+        self.assertTrue(applied, "Expected the force-apply to receive manifests on stdin")
+        self.assertEqual(
+            applied.count("kind: CustomResourceDefinition"), 2,
+            f"Both rendered CRDs must be force-applied:\n{applied}",
+        )
+        self.assertIn("opentelemetrycollectors.opentelemetry.io", applied)
+        self.assertIn("instrumentations.opentelemetry.io", applied)
+        self.assertNotIn(
+            "kind: Deployment", applied,
+            f"Non-CRD docs must be filtered out before force-apply:\n{applied}",
         )
 
 
