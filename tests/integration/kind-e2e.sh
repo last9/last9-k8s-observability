@@ -16,6 +16,7 @@
 #   monitoring-only  kube-prometheus-stack (metrics)
 #   events-only      Kubernetes events agent
 #   crd-conflict     Pre-seed Terraform-owned Prometheus CRDs, then monitoring-only
+#   operator-crd-conflict  Pre-seed foreign-owned OTel CRDs, then operator-only
 #   context          monitoring-only pinned to an explicit kubectl context
 #   all              Run every mode above, each in its own cluster
 #
@@ -188,6 +189,50 @@ test_crd_conflict() {
     info "✓ crd-conflict passed"
 }
 
+# Reproduce the customer failure on the OTel operator path: OTel CRDs already on
+# the cluster, owned by a non-Helm field manager (cert-manager-cainjector, which
+# in a live cluster owns .spec.conversion.webhook.clientConfig.caBundle). The
+# opentelemetry-operator chart ships CRDs as templates gated by crds.create (NOT
+# the chart's crds/ dir), so the script must render them with
+# `helm template --include-crds`, force-apply them out-of-band, and install with
+# crds.create=false so Helm never re-applies — and never conflicts on — them.
+#
+# Note: this is a PATH-ASSERTION test, not a live-race test. With no running
+# cainjector re-asserting ownership, adopt_otel_crds would itself resolve a
+# static conflict — so the guard here is that the crds.create=false mitigation
+# path is taken (catches removal of the fix), not that an active-controller race
+# is won. The live race only manifests with real cert-manager + Helm v4; that is
+# verified by a manual repro (cert-manager + seed operator -> cainjector owns
+# caBundle -> the unpatched script reproduces the exact customer conflict and the
+# patched script installs cleanly).
+test_operator_crd_conflict() {
+    create_cluster "${CLUSTER_PREFIX}-operator-crdconflict"
+
+    info "Pre-seeding OTel CRDs as field-manager cert-manager-cainjector"
+    # Pin to the operator tag matching the chart the script installs, so the
+    # seeded CRD schema is the one the mitigation upgrades from — not a moving
+    # `main` that can drift. Chart OPERATOR_VERSION=0.92.1 (last9-otel-setup.sh)
+    # has appVersion 0.129.1, i.e. operator tag v0.129.1. Bump both together.
+    local crd_base="https://raw.githubusercontent.com/open-telemetry/opentelemetry-operator/v0.129.1/config/crd/bases"
+    for crd in \
+        opentelemetry.io_opentelemetrycollectors \
+        opentelemetry.io_instrumentations \
+        opentelemetry.io_opampbridges; do
+        kubectl apply --server-side --field-manager=cert-manager-cainjector \
+            -f "${crd_base}/${crd}.yaml" \
+            || warn "could not pre-seed $crd (continuing)"
+    done
+
+    local out
+    out=$(run_setup operator-only token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP" 2>&1) \
+        || { echo "$out"; fail "operator-only failed with pre-existing CRDs"; }
+
+    echo "$out" | grep -q -- "crds.create=false\|Pre-existing OpenTelemetry CRDs detected" \
+        || fail "script did not take the crds.create=false path with pre-existing OTel CRDs"
+    assert_rollout deployment opentelemetry-operator
+    info "✓ operator-crd-conflict passed"
+}
+
 test_context() {
     create_cluster "${CLUSTER_PREFIX}-context"
     # Use the existing context when provided, else the kind-<name> context
@@ -226,17 +271,19 @@ main() {
         monitoring-only) test_monitoring_only ;;
         events-only)     test_events_only ;;
         crd-conflict)    test_crd_conflict ;;
+        operator-crd-conflict) test_operator_crd_conflict ;;
         context)         test_context ;;
         all)
-            test_operator_only;   cleanup_cluster
-            test_logs_only;       cleanup_cluster
-            test_monitoring_only; cleanup_cluster
-            test_events_only;     cleanup_cluster
-            test_crd_conflict;    cleanup_cluster
+            test_operator_only;          cleanup_cluster
+            test_logs_only;              cleanup_cluster
+            test_monitoring_only;        cleanup_cluster
+            test_events_only;            cleanup_cluster
+            test_crd_conflict;           cleanup_cluster
+            test_operator_crd_conflict;  cleanup_cluster
             test_context
             ;;
         *)
-            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|crd-conflict|context|all>" >&2
+            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|crd-conflict|operator-crd-conflict|context|all>" >&2
             exit 1
             ;;
     esac

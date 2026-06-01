@@ -1748,6 +1748,59 @@ install_operator() {
     # Adopt any pre-existing OTel CRDs before Helm tries to manage them
     adopt_otel_crds
 
+    # When OTel CRDs already exist (e.g. a prior cert-manager-based install),
+    # cert-manager-cainjector owns .spec.conversion.webhook.clientConfig.caBundle
+    # via server-side apply and re-injects it continuously. Helm v4's SSA does
+    # NOT pass --force-conflicts, so its CRD apply fails fatally:
+    #   conflict with "cert-manager-cainjector" ... .caBundle
+    # The adoption migration above cannot win that race against an active
+    # controller.
+    #
+    # Unlike kube-prometheus-stack (CRDs in the chart's crds/ dir, so
+    # `helm show crds` + --skip-crds work), the opentelemetry-operator chart
+    # ships its CRDs as TEMPLATES gated by crds.create — `helm show crds` is
+    # empty and --skip-crds has NO effect. So instead: render the CRDs from the
+    # chart template and force-apply them out-of-band (upgrades schema to the
+    # chart version and forcibly takes field ownership from cainjector), then
+    # disable Helm's own CRD rendering with crds.create=false so Helm never
+    # applies — and never re-conflicts on — the CRDs.
+    # Probe for ANY pre-existing *.opentelemetry.io CRD — a partial set (e.g.
+    # instrumentations present but collectors absent) hits the same cainjector
+    # conflict, so gate on any match rather than one well-known name. The
+    # out-of-band force-apply below is idempotent and safe to run whenever any
+    # OTel CRD exists. This mirrors what adopt_otel_crds already iterates.
+    local disable_crds=""
+    if kubectl get crd -o name 2>/dev/null | grep -q '\.opentelemetry\.io$'; then
+        log_info "Pre-existing OpenTelemetry CRDs detected — force-applying chart CRDs and installing with crds.create=false"
+
+        # NOTE: this script runs under `set -e` but NOT `set -o pipefail`, so a
+        # piped `helm template | awk | kubectl apply` would mask an upstream
+        # failure (a broken render or a failed apply) and still proceed to
+        # crds.create=false — leaving stale/missing CRDs with no error. Capture
+        # each stage and check it explicitly instead.
+        local rendered_crds
+        if ! rendered_crds=$(helm template opentelemetry-operator open-telemetry/opentelemetry-operator \
+            --version "$OPERATOR_VERSION" --include-crds --set crds.create=true \
+            $HELM_SCHEMA_FLAG 2>&1); then
+            log_error "Failed to render opentelemetry-operator CRDs via 'helm template'. Output: $rendered_crds"
+        fi
+
+        # Isolate only the CustomResourceDefinition documents from the chart.
+        local crd_manifests
+        crd_manifests=$(printf '%s\n' "$rendered_crds" \
+            | awk 'BEGIN{RS="\n---\n"} /(^|\n)kind: CustomResourceDefinition/ {print "---"; print $0}')
+
+        if ! printf '%s' "$crd_manifests" | grep -q 'kind: CustomResourceDefinition'; then
+            log_error "Rendered opentelemetry-operator chart contained no CustomResourceDefinition documents; refusing to install with crds.create=false."
+        fi
+
+        if ! printf '%s\n' "$crd_manifests" | kubectl apply --server-side --force-conflicts \
+            --field-manager=helm -f -; then
+            log_error "Failed to force-apply opentelemetry-operator CRDs (kubectl apply --server-side --force-conflicts)."
+        fi
+        disable_crds="yes"
+    fi
+
     # Build helm command as array for proper argument handling
     local helm_args=(
         "upgrade" "--install"
@@ -1760,6 +1813,11 @@ install_operator() {
         "--set" "admissionWebhooks.certManager.enabled=false"
         "--set" "admissionWebhooks.autoGenerateCert.enabled=true"
     )
+
+    # Disable Helm's CRD rendering when CRDs were pre-existing (handled above)
+    if [ -n "$disable_crds" ]; then
+        helm_args+=("--set" "crds.create=false")
+    fi
 
     # Add tolerations and nodeSelector if provided
     if [ -n "$TOLERATIONS_FILE_PATH" ]; then
