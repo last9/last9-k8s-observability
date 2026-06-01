@@ -209,7 +209,11 @@ test_operator_crd_conflict() {
     create_cluster "${CLUSTER_PREFIX}-operator-crdconflict"
 
     info "Pre-seeding OTel CRDs as field-manager cert-manager-cainjector"
-    local crd_base="https://raw.githubusercontent.com/open-telemetry/opentelemetry-operator/main/config/crd/bases"
+    # Pin to the operator tag matching the chart the script installs, so the
+    # seeded CRD schema is the one the mitigation upgrades from — not a moving
+    # `main` that can drift. Chart OPERATOR_VERSION=0.92.1 (last9-otel-setup.sh)
+    # has appVersion 0.129.1, i.e. operator tag v0.129.1. Bump both together.
+    local crd_base="https://raw.githubusercontent.com/open-telemetry/opentelemetry-operator/v0.129.1/config/crd/bases"
     for crd in \
         opentelemetry.io_opentelemetrycollectors \
         opentelemetry.io_instrumentations \
