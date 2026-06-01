@@ -1085,8 +1085,10 @@ check_prerequisites() {
         log_error "Monitoring endpoint is required. Provide monitoring-endpoint=<your-monitoring-endpoint>."
     fi
 
-    # Check if monitoring endpoint is provided for all sources mode (which includes monitoring)
-    if [ "$UNINSTALL_MODE" = false ] && [ "$MONITORING_ONLY" = false ] && [ "$OPERATOR_ONLY" = false ] && [ "$LOGS_ONLY" = false ] && [ "$SETUP_MONITORING" = true ] && [ -z "$MONITORING_ENDPOINT" ]; then
+    # Check if monitoring endpoint is provided for all sources mode (which includes monitoring).
+    # events-only is excluded: the events agent forwards Kubernetes events to the
+    # OTLP logs endpoint and does not need a metrics/monitoring endpoint.
+    if [ "$UNINSTALL_MODE" = false ] && [ "$MONITORING_ONLY" = false ] && [ "$OPERATOR_ONLY" = false ] && [ "$LOGS_ONLY" = false ] && [ "$EVENTS_ONLY" = false ] && [ "$SETUP_MONITORING" = true ] && [ -z "$MONITORING_ENDPOINT" ]; then
         show_help
         log_error "Monitoring endpoint is required for all-sources install. Provide monitoring-endpoint=<your-monitoring-endpoint>."
     fi
