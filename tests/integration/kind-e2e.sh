@@ -43,7 +43,30 @@ DUMMY_PASS="testpass"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[E2E]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[E2E]${NC} $1"; }
-fail()  { echo -e "${RED}[E2E FAIL]${NC} $1"; exit 1; }
+
+# Dump cluster state for the OTel operator (and the namespace) so a CI failure
+# shows WHY a pod never became Ready — e.g. ImagePullBackOff, CrashLoopBackOff,
+# Pending, or a stuck webhook-cert job — instead of just "did not become ready".
+# Best-effort: every command is guarded so this never masks the original error.
+dump_diagnostics() {
+    kubectl cluster-info >/dev/null 2>&1 || return 0
+    echo -e "${YELLOW}===== E2E DIAGNOSTICS (namespace: $NAMESPACE) =====${NC}"
+    echo "--- pods ---";        kubectl get pods -n "$NAMESPACE" -o wide 2>&1 || true
+    echo "--- deployments ---"; kubectl get deploy -n "$NAMESPACE" 2>&1 || true
+    echo "--- operator describe ---"
+    kubectl describe deploy,pod -n "$NAMESPACE" \
+        -l app.kubernetes.io/name=opentelemetry-operator 2>&1 || true
+    echo "--- operator logs (all containers, prev+current) ---"
+    kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/name=opentelemetry-operator \
+        --all-containers --tail=100 --prefix 2>&1 || true
+    kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/name=opentelemetry-operator \
+        --all-containers --tail=50 --prefix --previous 2>&1 || true
+    echo "--- recent events ---"
+    kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>&1 | tail -30 || true
+    echo -e "${YELLOW}===== END DIAGNOSTICS =====${NC}"
+}
+
+fail()  { echo -e "${RED}[E2E FAIL]${NC} $1"; dump_diagnostics; exit 1; }
 
 # When EXISTING_CONTEXT is set, run against that already-running cluster
 # (minikube, an existing kind cluster, etc.) instead of creating ephemeral
