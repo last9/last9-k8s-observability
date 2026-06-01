@@ -148,17 +148,27 @@ detect_host_platform() {
     log_info "Host platform: arch=${HOST_ARCH} pkg=${HOST_PKG}"
 }
 
-# Detect Helm major version and set schema validation flag
-# Helm v4+ enforces stricter JSON Schema validation (Draft 2019-09) which
-# may reject upstream charts with schema bugs. We add --skip-schema-validation
-# for Helm v4+ since K8s admission controllers still validate all resources.
+# Enable --skip-schema-validation whenever the installed Helm supports it.
+#
+# Helm 3.18.5+ (and Helm v4) enforce strict JSON Schema *metaschema* validation
+# (Draft 2019-09) against a chart's own values.schema.json. Upstream charts with
+# minor schema-spec violations are then rejected before install — e.g. the
+# opentelemetry-operator chart declares `manager.featureGates.examples` as a
+# string when the metaschema requires an array, producing:
+#   "...values.schema.json#" is not valid against metaschema ... 'examples': got string, want array
+# --skip-schema-validation (available since Helm 3.16) makes install/upgrade skip
+# that validation entirely; Kubernetes admission controllers still validate every
+# rendered resource, so this is safe.
+#
+# We probe for the flag's availability via `helm upgrade --help` rather than
+# parsing version numbers. Version gating is fragile: the previous "major >= 4"
+# check passed on developer machines running Helm v4 but silently left every
+# customer on Helm 3.18.5–3.x exposed to the failure above.
 HELM_SCHEMA_FLAG=""
-detect_helm_version() {
-    local helm_ver
-    helm_ver=$(helm version --short 2>/dev/null | grep -oE 'v[0-9]+' | head -1 | tr -d 'v')
-    if [ -n "$helm_ver" ] && [ "$helm_ver" -ge 4 ] 2>/dev/null; then
+detect_helm_schema_flag() {
+    if helm upgrade --help 2>/dev/null | grep -q -- '--skip-schema-validation'; then
         HELM_SCHEMA_FLAG="--skip-schema-validation"
-        log_info "Helm v${helm_ver} detected — adding --skip-schema-validation for chart compatibility"
+        log_info "Helm supports --skip-schema-validation — enabling it to tolerate upstream chart schema quirks"
     fi
 }
 
@@ -1497,8 +1507,8 @@ update_monitoring_endpoint() {
 setup_helm_repos() {
     log_info "Setting up Helm repositories..."
 
-    # Detect Helm version for compatibility flags
-    detect_helm_version
+    # Enable --skip-schema-validation if this Helm supports it (compatibility)
+    detect_helm_schema_flag
 
     helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts

@@ -210,6 +210,103 @@ load_helpers() {
 }
 
 # ---------------------------------------------------------------------------
+# detect_helm_schema_flag — enable --skip-schema-validation when Helm supports it
+# Regression: Helm 3.18.5+ strict metaschema validation rejects the upstream
+# opentelemetry-operator chart (featureGates.examples is a string). The flag must
+# be enabled on ANY Helm that supports it (>=3.16), not only major >= 4.
+# ---------------------------------------------------------------------------
+
+detect_helm_schema_flag_func() {
+    awk '/^detect_helm_schema_flag\(\)/,/^}/' "$SCRIPT"
+}
+
+# NOTE: assertions are the LAST commands in each test. bats has no implicit
+# `set -e`, so a trailing `rm -rf` would mask a failing assertion. Cleanup runs
+# before the assertions; $output is already captured by `run`.
+
+@test "detect_helm_schema_flag: enables flag when Helm supports --skip-schema-validation" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/helm" << 'SH'
+#!/bin/sh
+if [ "$1" = "upgrade" ] && [ "$2" = "--help" ]; then
+  echo "      --skip-schema-validation   if set, disables JSON schema validation"
+  exit 0
+fi
+exit 0
+SH
+    chmod +x "$tmpdir/helm"
+
+    func_body=$(detect_helm_schema_flag_func)
+    run bash -c "
+        export PATH=$tmpdir:\$PATH
+        log_info() { :; }
+        HELM_SCHEMA_FLAG=''
+        $func_body
+        detect_helm_schema_flag
+        echo \"flag=[\$HELM_SCHEMA_FLAG]\"
+    "
+    rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"flag=[--skip-schema-validation]"* ]]
+}
+
+@test "detect_helm_schema_flag: Helm 3.18.5 (major 3) still gets the flag (customer regression)" {
+    tmpdir=$(mktemp -d)
+    # Simulate Helm 3.18.5: --version reports v3.18.5 but help DOES expose the flag.
+    cat > "$tmpdir/helm" << 'SH'
+#!/bin/sh
+if [ "$1" = "version" ]; then echo "v3.18.5+gd84a6c0"; exit 0; fi
+if [ "$1" = "upgrade" ] && [ "$2" = "--help" ]; then
+  echo "      --skip-schema-validation   if set, disables JSON schema validation"
+  exit 0
+fi
+exit 0
+SH
+    chmod +x "$tmpdir/helm"
+
+    func_body=$(detect_helm_schema_flag_func)
+    run bash -c "
+        export PATH=$tmpdir:\$PATH
+        log_info() { :; }
+        HELM_SCHEMA_FLAG=''
+        $func_body
+        detect_helm_schema_flag
+        echo \"flag=[\$HELM_SCHEMA_FLAG]\"
+    "
+    rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"flag=[--skip-schema-validation]"* ]]
+}
+
+@test "detect_helm_schema_flag: old Helm without the flag leaves it empty" {
+    tmpdir=$(mktemp -d)
+    # Simulate Helm < 3.16: help does NOT list --skip-schema-validation.
+    cat > "$tmpdir/helm" << 'SH'
+#!/bin/sh
+if [ "$1" = "upgrade" ] && [ "$2" = "--help" ]; then
+  echo "      --atomic   if set, upgrade process rolls back on failure"
+  echo "      --wait     if set, will wait until all resources are ready"
+  exit 0
+fi
+exit 0
+SH
+    chmod +x "$tmpdir/helm"
+
+    func_body=$(detect_helm_schema_flag_func)
+    run bash -c "
+        export PATH=$tmpdir:\$PATH
+        log_info() { :; }
+        HELM_SCHEMA_FLAG=''
+        $func_body
+        detect_helm_schema_flag
+        echo \"flag=[\$HELM_SCHEMA_FLAG]\"
+    "
+    rm -rf "$tmpdir"
+    [ "$status" -eq 0 ]
+    [ "$output" = "flag=[]" ]
+}
+
+# ---------------------------------------------------------------------------
 # setup_context_wrappers
 # ---------------------------------------------------------------------------
 
