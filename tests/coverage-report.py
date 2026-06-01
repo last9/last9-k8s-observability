@@ -36,6 +36,7 @@ TEST_FILES = [
     os.path.join(REPO_ROOT, "tests", "integration", "uninstall.bats"),
     os.path.join(REPO_ROOT, "tests", "test_adopt_otel_crds.py"),
     os.path.join(REPO_ROOT, "tests", "test_adopt_prometheus_crds.py"),
+    os.path.join(REPO_ROOT, "tests", "test_install_operator.py"),
 ]
 
 # main() runs these for every (non-empty) invocation — see main()/parse_arguments.
