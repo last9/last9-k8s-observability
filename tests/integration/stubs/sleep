@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# sleep stub for orchestration tests — no-op so uninstall paths (which sleep
+# 5-10s waiting for Helm cleanup) run instantly under test.
+exit 0

@@ -34,6 +34,29 @@ jobs:
       - name: Run unit tests
         run: bats tests/unit.bats
 
+  # Static test-coverage estimate for last9-otel-setup.sh. Report-only — never
+  # fails the build. (Runtime kcov coverage is unavailable: its bash
+  # instrumentation is Linux-only and does not reach the grandchild
+  # `bash "$SCRIPT"` the tests spawn, so we estimate from the call graph.)
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Estimate coverage
+        run: |
+          report="$(python3 tests/coverage-report.py)"
+          echo "$report"
+          {
+            echo "### last9-otel-setup.sh test coverage"
+            echo '```'
+            echo "$report" | grep -E "Functions:|Covered:|Line-weighted:|Directly tested:"
+            echo '```'
+            echo "Untested functions:"
+            echo "$report" | sed -n '/Untested (/,/^---/p' | grep '    - ' || echo "    (none)"
+            echo "Unreachable from main() — dead/unused:"
+            echo "$report" | sed -n '/Unreachable from main/,/^===/p' | grep '    - ' || echo "    (none)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Layer 2 — real kind cluster, one mode per matrix leg (parallel, isolated).
   # CRD-conflict legs run on Helm v4 so the server-side-apply default codepath
   # (the version where the cert-manager-cainjector caBundle conflict surfaces)

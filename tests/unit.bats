@@ -591,3 +591,221 @@ YAML
     [[ "$output" == *"          serverName: metrics.last9.io"* ]]
     rm -rf "$tmpdir"
 }
+
+# ---------------------------------------------------------------------------
+# update_deployment_mode — flips daemonset→deployment, disables logsCollection,
+# comments out the filelog receiver (operator-only collector tweak).
+# ---------------------------------------------------------------------------
+
+update_deployment_mode_func() {
+    awk '/^update_deployment_mode\(\)/,/^}/' "$SCRIPT"
+}
+
+@test "update_deployment_mode: daemonset→deployment, logsCollection off, filelog commented" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/last9-otel-collector-values.yaml" <<'YAML'
+mode: "daemonset"
+presets:
+  logsCollection:
+    enabled: true
+config:
+  service:
+    pipelines:
+      logs:
+        receivers:
+          - filelog
+YAML
+    func_body=$(update_deployment_mode_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { echo \"[ERROR] \$1\"; exit 1; }
+        $func_body
+        update_deployment_mode
+    "
+    [ "$status" -eq 0 ]
+    grep -q 'mode: "deployment"' "$tmpdir/last9-otel-collector-values.yaml"
+    grep -A1 'logsCollection:' "$tmpdir/last9-otel-collector-values.yaml" | grep -q 'enabled: false'
+    grep -q '          # - filelog' "$tmpdir/last9-otel-collector-values.yaml"
+    # original is backed up
+    [ -f "$tmpdir/last9-otel-collector-values.yaml.backup" ]
+    rm -rf "$tmpdir"
+}
+
+@test "update_deployment_mode: errors when the values file is missing" {
+    tmpdir=$(mktemp -d)
+    func_body=$(update_deployment_mode_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $func_body
+        update_deployment_mode
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"[ERROR]"* ]]
+    [[ "$output" == *"not found"* ]]
+    rm -rf "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
+# apply_tolerations_to_monitoring_values — awk/sed fallback (USE_YQ=false),
+# so no yq dependency in CI.
+# ---------------------------------------------------------------------------
+
+apply_tolerations_func() {
+    awk '/^apply_tolerations_to_monitoring_values\(\)/,/^}/' "$SCRIPT"
+}
+
+@test "apply_tolerations (fallback): injects tolerations + nodeSelector into monitoring values" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/values.yaml" <<'YAML'
+prometheusOperator:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 30s
+YAML
+    cat > "$tmpdir/tolerations.yaml" <<'YAML'
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: monitoring
+    effect: NoSchedule
+nodeSelector:
+  workload: monitoring
+nodeExporterTolerations:
+  - operator: Exists
+YAML
+    func_body=$(apply_tolerations_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { echo \"[ERROR] \$1\"; exit 1; }
+        USE_YQ=false
+        TOLERATIONS_FILE_PATH='$tmpdir/tolerations.yaml'
+        $func_body
+        apply_tolerations_to_monitoring_values values.yaml
+    "
+    [ "$status" -eq 0 ]
+    # backup written
+    [ -f "$tmpdir/values.yaml.backup-tolerations" ]
+    # tolerations + nodeSelector injected from the tolerations file
+    grep -q 'key: dedicated' "$tmpdir/values.yaml"
+    grep -q 'workload: monitoring' "$tmpdir/values.yaml"
+    # node-exporter got the explicit nodeExporterTolerations (operator: Exists)
+    grep -q 'operator: Exists' "$tmpdir/values.yaml"
+    rm -rf "$tmpdir"
+}
+
+@test "apply_tolerations (fallback): defaults node-exporter to operator:Exists when none provided" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/values.yaml" <<'YAML'
+prometheusOperator:
+  enabled: true
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+YAML
+    # tolerations file with no nodeExporterTolerations section
+    cat > "$tmpdir/tolerations.yaml" <<'YAML'
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: monitoring
+    effect: NoSchedule
+YAML
+    func_body=$(apply_tolerations_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { echo \"[ERROR] \$1\"; exit 1; }
+        USE_YQ=false
+        TOLERATIONS_FILE_PATH='$tmpdir/tolerations.yaml'
+        $func_body
+        apply_tolerations_to_monitoring_values values.yaml
+    "
+    [ "$status" -eq 0 ]
+    grep -q 'operator: Exists' "$tmpdir/values.yaml"
+    rm -rf "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
+# detect_existing_prometheus_operator — returns 0 (found, warns) / 1 (none).
+# ---------------------------------------------------------------------------
+
+detect_prom_operator_func() {
+    awk '/^detect_existing_prometheus_operator\(\)/,/^}/' "$SCRIPT"
+}
+
+@test "detect_existing_prometheus_operator: returns 0 and warns when one exists in another namespace" {
+    func_body=$(detect_prom_operator_func)
+    run bash -c "
+        GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        log_info() { :; }; log_warn() { echo \"[WARN] \$1\"; }
+        NAMESPACE='last9'
+        # kubectl reports a kube-prometheus-stack operator deployment in 'monitoring'
+        kubectl() {
+            case \"\$*\" in
+                *kube-prometheus-stack-operator*) echo 'monitoring  kps-operator  1/1  1  1  5m' ;;
+                *) : ;;
+            esac
+        }
+        $func_body
+        if detect_existing_prometheus_operator; then echo RC=0; else echo RC=1; fi
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=0"* ]]
+    [[ "$output" == *"Existing Prometheus Operator found"* ]]
+}
+
+@test "detect_existing_prometheus_operator: returns 1 when none found" {
+    func_body=$(detect_prom_operator_func)
+    run bash -c "
+        GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        log_info() { :; }; log_warn() { :; }
+        NAMESPACE='last9'
+        kubectl() { : ; }   # no deployments anywhere
+        $func_body
+        if detect_existing_prometheus_operator; then echo RC=0; else echo RC=1; fi
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=1"* ]]
+}
+
+@test "detect_existing_prometheus_operator: ignores an operator in our own namespace" {
+    func_body=$(detect_prom_operator_func)
+    run bash -c "
+        GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        log_info() { :; }; log_warn() { :; }
+        NAMESPACE='last9'
+        # operator is in OUR namespace — awk filters it out, so 'none found'
+        kubectl() {
+            case \"\$*\" in
+                *kube-prometheus-stack-operator*) echo 'last9  kps-operator  1/1  1  1  5m' ;;
+                *) : ;;
+            esac
+        }
+        $func_body
+        if detect_existing_prometheus_operator; then echo RC=0; else echo RC=1; fi
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"RC=1"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# show_examples — the no-argument usage screen.
+# ---------------------------------------------------------------------------
+
+@test "show_examples: prints the key usage examples" {
+    func_body=$(awk '/^show_examples\(\)/,/^}/' "$SCRIPT")
+    run bash -c "$func_body
+        show_examples
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Quick Examples:"* ]]
+    [[ "$output" == *"monitoring-only"* ]]
+    [[ "$output" == *"operator-only"* ]]
+    [[ "$output" == *"uninstall-all"* ]]
+}
