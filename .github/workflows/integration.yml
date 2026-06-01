@@ -1,0 +1,74 @@
+name: integration
+
+on:
+  pull_request:
+    paths:
+      - 'last9-otel-setup.sh'
+      - 'tests/**'
+      - '*.yaml'
+      - '.github/workflows/integration.yml'
+  workflow_dispatch:
+
+jobs:
+  # Layer 1 — command orchestration with stubs. Fast, no cluster.
+  layer1-orchestration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: Run orchestration tests
+        run: bash tests/integration/run.sh layer1
+
+  # Layer 1 — pure helper unit tests
+  layer1-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: Run unit tests
+        run: bats tests/unit.bats
+
+  # Layer 2 — real kind cluster, one mode per matrix leg (parallel, isolated).
+  layer2-kind:
+    runs-on: ubuntu-latest
+    needs: layer1-orchestration
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - operator-only
+          - logs-only
+          - monitoring-only
+          - events-only
+          - crd-conflict
+          - context
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # repo= clone of the local checkout needs full history
+
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Run kind e2e (${{ matrix.mode }})
+        run: bash tests/integration/run.sh layer2 ${{ matrix.mode }}
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A || true
+          kubectl get events -n last9 --sort-by=.lastTimestamp || true
+          kubectl describe pods -n last9 || true
