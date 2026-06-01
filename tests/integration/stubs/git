@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# git stub for Layer 1 orchestration tests.
+# Intercepts `git clone --depth=1 <url> .` and copies the real repo's config
+# files into the current directory (the script's WORK_DIR) instead of cloning
+# over the network. Everything else is a no-op success.
+#
+# Env:
+#   REPO_SRC   absolute path to the repo root to copy config files from
+
+if [ "$1" = "clone" ]; then
+    if [ -z "$REPO_SRC" ]; then
+        echo "git stub: REPO_SRC not set" >&2
+        exit 1
+    fi
+    # Copy top-level files (values yamls, instrumentation, svc) into cwd.
+    # Skip .git and any transient work directories.
+    for entry in "$REPO_SRC"/*; do
+        base=$(basename "$entry")
+        case "$base" in
+            .git|l9-otel-setup-*|tests) continue ;;
+        esac
+        cp -R "$entry" . 2>/dev/null || true
+    done
+    exit 0
+fi
+
+exit 0

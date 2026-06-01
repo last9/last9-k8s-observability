@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# helm stub for Layer 1 orchestration tests.
+# Logs every invocation to $HELM_CALLS_LOG and simulates responses.
+#
+# Env flags:
+#   HELM_CALLS_LOG          file to append each call to (full arg string)
+#   SIMULATE_HELM_FAILURE   "1" → `helm upgrade --install` exits non-zero
+#   MOCK_HELM_VERSION       version string for `helm version --short` (default v3.14.0)
+
+[ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
+
+# Strip a leading `--kube-context <value>` injected by the context wrapper
+args=("$@")
+if [ "${args[0]}" = "--kube-context" ]; then
+    args=("${args[@]:2}")
+fi
+cmd="${args[*]}"
+
+case "$cmd" in
+    "version --short"*)
+        echo "${MOCK_HELM_VERSION:-v3.14.0}"
+        exit 0
+        ;;
+    "repo "*)
+        exit 0
+        ;;
+    "show crds "*)
+        # Emit nothing — no CRD manifests to apply in stub mode
+        exit 0
+        ;;
+    "upgrade --install "*)
+        if [ "$SIMULATE_HELM_FAILURE" = "1" ]; then
+            echo "Error: UPGRADE FAILED: simulated helm failure" >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+    "uninstall "*)
+        exit 0
+        ;;
+    *)
+        exit 0
+        ;;
+esac

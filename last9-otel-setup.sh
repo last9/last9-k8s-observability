@@ -1066,38 +1066,29 @@ check_prerequisites() {
     
     # Skip token check for uninstall mode, logs-only mode, monitoring-only mode, and events-only mode
     # Note: operator-only mode will check for token later in its specific section
+    # Help is printed before the terminal log_error so the red error line is the
+    # last thing the user sees (log_error exits the process).
     if [ "$UNINSTALL_MODE" = false ] && [ "$LOGS_ONLY" = false ] && [ "$MONITORING_ONLY" = false ] && [ "$EVENTS_ONLY" = false ] && [ "$OPERATOR_ONLY" = false ] && [ -z "$AUTH_TOKEN" ]; then
-        log_error "Auth token is required for installation."
-        echo ""
         show_help
-        exit 1
+        log_error "Auth token is required for installation."
     fi
 
     # Check if endpoint is provided for non-monitoring and non-events modes
     if [ "$UNINSTALL_MODE" = false ] && [ "$MONITORING_ONLY" = false ] && [ "$EVENTS_ONLY" = false ] && [ -z "$OTEL_ENDPOINT" ]; then
-        log_error "OTEL endpoint is required for installation."
-        log_error "Please provide endpoint=<your-otel-endpoint> parameter."
-        echo ""
         show_help
-        exit 1
+        log_error "OTEL endpoint is required. Provide endpoint=<your-otel-endpoint>."
     fi
-    
+
     # Check if monitoring endpoint is provided for modes that include monitoring
     if [ "$UNINSTALL_MODE" = false ] && [ "$MONITORING_ONLY" = true ] && [ -z "$MONITORING_ENDPOINT" ]; then
-        log_error "Monitoring endpoint is required for monitoring installation."
-        log_error "Please provide monitoring-endpoint=<your-monitoring-endpoint> parameter."
-        echo ""
         show_help
-        exit 1
+        log_error "Monitoring endpoint is required. Provide monitoring-endpoint=<your-monitoring-endpoint>."
     fi
-    
+
     # Check if monitoring endpoint is provided for all sources mode (which includes monitoring)
     if [ "$UNINSTALL_MODE" = false ] && [ "$MONITORING_ONLY" = false ] && [ "$OPERATOR_ONLY" = false ] && [ "$LOGS_ONLY" = false ] && [ "$SETUP_MONITORING" = true ] && [ -z "$MONITORING_ENDPOINT" ]; then
-        log_error "Monitoring endpoint is required for all sources installation (includes monitoring)."
-        log_error "Please provide monitoring-endpoint=<your-monitoring-endpoint> parameter."
-        echo ""
         show_help
-        exit 1
+        log_error "Monitoring endpoint is required for all-sources install. Provide monitoring-endpoint=<your-monitoring-endpoint>."
     fi
     
     command -v helm >/dev/null 2>&1 || log_error "helm is required but not installed. Aborting."
@@ -1605,13 +1596,12 @@ update_monitoring_endpoint() {
         escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
         sed -i.tmp "s|https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write|$escaped_endpoint|g" k8s-monitoring-values.yaml
     else
-        log_error "No supported monitoring endpoint placeholder found in the file."
         log_info "Please use one of these placeholders in your YAML file:"
         echo "  - {{YOUR_MONITORING_ENDPOINT}}"
         echo "  - {{MONITORING_ENDPOINT}}"
         echo "  - \${MONITORING_ENDPOINT}"
         echo "  - https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write (old format)"
-        exit 1
+        log_error "No supported monitoring endpoint placeholder found in the file."
     fi
     
     # Remove the temporary file created by sed -i
@@ -1634,7 +1624,10 @@ setup_helm_repos() {
 
     helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    helm repo update
+    # Update only the repos we add — a bare `helm repo update` refreshes every
+    # repo in the user's Helm config, which is slow and fails noisily when other
+    # (unrelated) repos have stale/dead URLs.
+    helm repo update open-telemetry prometheus-community
 
     log_info "Helm repositories updated!"
 }
@@ -2119,7 +2112,7 @@ setup_last9_monitoring() {
     # Add prometheus-community repo if not already added
     log_info "Adding prometheus-community Helm repository..."
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    helm repo update
+    helm repo update prometheus-community
 
     # Detect an existing cluster-wide Prometheus Operator and disable the
     # bundled one if found, to prevent the two-operator reconciliation conflict.
