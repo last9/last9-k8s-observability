@@ -1307,26 +1307,52 @@ inject_collector_tls_server_name() {
         log_info "Created backup: $file.backup"
     fi
 
-    # Anchor on the otlp/last9: exporter block (4-space key) and insert after its
-    # 6-space endpoint: line. This avoids the decoy endpoint: lines for health_check,
-    # the otlp receivers, and internalTelemetryViaOTLP, which live in other blocks.
-    awk -v sni="$SERVER_NAME" '
-        /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+    # Does the otlp/last9 block already have a real (uncommented) tls: child? If so we
+    # add server_name_override under it rather than emitting a second tls: key (which
+    # would be a duplicate map key). Commented "# tls:" examples elsewhere don't match.
+    local has_tls
+    has_tls=$(awk '
+        /^    otlp\/last9:[[:space:]]*$/ { in_block=1; next }
         in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
-        {
-            print
-            if (in_block && $0 ~ /^      endpoint:/) {
-                print "      tls:"
-                print "        insecure: false"
-                print "        server_name_override: " sni
+        in_block && /^      tls:[[:space:]]*$/ { print "yes"; exit }
+    ' "$file")
+
+    if [ -n "$has_tls" ]; then
+        # Insert server_name_override as a child of the existing otlp/last9 tls: block.
+        awk -v sni="$SERVER_NAME" '
+            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
+            {
+                print
+                if (in_block && $0 ~ /^      tls:[[:space:]]*$/) {
+                    print "        server_name_override: " sni
+                }
             }
-        }
-    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+        ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    else
+        # No tls block yet: anchor on the otlp/last9: exporter block (4-space key) and
+        # insert a fresh tls block after its 6-space endpoint: line. This avoids the
+        # decoy endpoint: lines for health_check, the otlp receivers, and
+        # internalTelemetryViaOTLP, which live in other blocks.
+        awk -v sni="$SERVER_NAME" '
+            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
+            {
+                print
+                if (in_block && $0 ~ /^      endpoint:/) {
+                    print "      tls:"
+                    print "        insecure: false"
+                    print "        server_name_override: " sni
+                }
+            }
+        ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    fi
 
     if grep -q "server_name_override: $SERVER_NAME" "$file"; then
         log_info "✓ TLS server_name_override injected into $file"
     else
-        log_warn "⚠ Could not verify TLS injection in $file. Please check the file manually."
+        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
+        [ -f "$file.backup" ] && cp "$file.backup" "$file"
         rm -f "$file.tmp"
     fi
 }
@@ -1344,7 +1370,9 @@ inject_monitoring_tls_server_name() {
         return 0
     fi
 
-    if grep -q 'serverName:' "$file"; then
+    # Anchor the idempotency guard to the exact 10-space serverName child we emit, so an
+    # unrelated serverName: elsewhere in the values file can't cause a silent skip.
+    if grep -q '^          serverName:' "$file"; then
         log_info "TLS serverName already present in $file, skipping"
         return 0
     fi
@@ -1371,7 +1399,8 @@ inject_monitoring_tls_server_name() {
     if grep -q "serverName: $SERVER_NAME" "$file"; then
         log_info "✓ TLS serverName injected into $file"
     else
-        log_warn "⚠ Could not verify TLS injection in $file. Please check the file manually."
+        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
+        [ -f "$file.backup" ] && cp "$file.backup" "$file"
         rm -f "$file.tmp"
     fi
 }

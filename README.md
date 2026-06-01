@@ -200,6 +200,8 @@ When set, it injects (only into the files being installed):
 
 When omitted (the default), no TLS block is added and the values files are unchanged — fully backward compatible.
 
+> **Note:** injection is idempotent — re-running with the *same* `server-name=` is a no-op. To **change** an already-injected SNI, edit the TLS block in the values file (or remove it) before re-running; the script will not overwrite an existing override.
+
 #### Applying SNI to an already-installed cluster
 
 If a release is already deployed, extract its live values, add the TLS block, and upgrade. Use `--reuse-values=false` because `helm get values` already returns the full merged value set:
