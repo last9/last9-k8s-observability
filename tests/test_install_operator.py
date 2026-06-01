@@ -5,8 +5,11 @@ Tests for install_operator CRD-conflict handling in last9-otel-setup.sh
 Reproduces the cert-manager-cainjector SSA field-conflict on
 .spec.conversion.webhook.clientConfig.caBundle: when OTel CRDs already exist,
 Helm's server-side apply collides with cert-manager-cainjector and the install
-fails. The fix mirrors the kube-prometheus path: apply chart CRDs out-of-band
-with --force-conflicts and pass --skip-crds to Helm.
+fails. Unlike kube-prometheus-stack (CRDs in the chart's crds/ dir, where
+--skip-crds works), opentelemetry-operator ships CRDs as templates gated by
+crds.create, so --skip-crds is a no-op. The fix instead renders the chart CRDs
+out-of-band, force-applies them (kubectl apply --server-side --force-conflicts),
+and passes --set crds.create=false to Helm so it never re-applies the CRDs.
 
 Uses mock kubectl/helm/sleep binaries (PATH override) — no cluster needed.
 Run: python3 tests/test_install_operator.py

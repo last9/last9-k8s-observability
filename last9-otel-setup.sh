@@ -1754,15 +1754,40 @@ install_operator() {
     # chart version and forcibly takes field ownership from cainjector), then
     # disable Helm's own CRD rendering with crds.create=false so Helm never
     # applies — and never re-conflicts on — the CRDs.
+    # Probe for ANY pre-existing *.opentelemetry.io CRD — a partial set (e.g.
+    # instrumentations present but collectors absent) hits the same cainjector
+    # conflict, so gate on any match rather than one well-known name. The
+    # out-of-band force-apply below is idempotent and safe to run whenever any
+    # OTel CRD exists. This mirrors what adopt_otel_crds already iterates.
     local disable_crds=""
-    if kubectl get crd opentelemetrycollectors.opentelemetry.io &>/dev/null 2>&1; then
+    if kubectl get crd -o name 2>/dev/null | grep -q '\.opentelemetry\.io$'; then
         log_info "Pre-existing OpenTelemetry CRDs detected — force-applying chart CRDs and installing with crds.create=false"
-        helm template opentelemetry-operator open-telemetry/opentelemetry-operator \
+
+        # NOTE: this script runs under `set -e` but NOT `set -o pipefail`, so a
+        # piped `helm template | awk | kubectl apply` would mask an upstream
+        # failure (a broken render or a failed apply) and still proceed to
+        # crds.create=false — leaving stale/missing CRDs with no error. Capture
+        # each stage and check it explicitly instead.
+        local rendered_crds
+        if ! rendered_crds=$(helm template opentelemetry-operator open-telemetry/opentelemetry-operator \
             --version "$OPERATOR_VERSION" --include-crds --set crds.create=true \
-            $HELM_SCHEMA_FLAG 2>/dev/null \
-            | awk 'BEGIN{RS="\n---\n"} /\nkind: CustomResourceDefinition/ || /^kind: CustomResourceDefinition/ {print "---"; print $0}' \
-            | kubectl apply --server-side --force-conflicts \
-              --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+            $HELM_SCHEMA_FLAG 2>&1); then
+            log_error "Failed to render opentelemetry-operator CRDs via 'helm template'. Output: $rendered_crds"
+        fi
+
+        # Isolate only the CustomResourceDefinition documents from the chart.
+        local crd_manifests
+        crd_manifests=$(printf '%s\n' "$rendered_crds" \
+            | awk 'BEGIN{RS="\n---\n"} /(^|\n)kind: CustomResourceDefinition/ {print "---"; print $0}')
+
+        if ! printf '%s' "$crd_manifests" | grep -q 'kind: CustomResourceDefinition'; then
+            log_error "Rendered opentelemetry-operator chart contained no CustomResourceDefinition documents; refusing to install with crds.create=false."
+        fi
+
+        if ! printf '%s\n' "$crd_manifests" | kubectl apply --server-side --force-conflicts \
+            --field-manager=helm -f -; then
+            log_error "Failed to force-apply opentelemetry-operator CRDs (kubectl apply --server-side --force-conflicts)."
+        fi
         disable_crds="yes"
     fi
 
