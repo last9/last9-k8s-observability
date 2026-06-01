@@ -58,6 +58,7 @@ TOLERATIONS_FILE=""
 USE_YQ=false
 DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
+SERVER_NAME=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -908,6 +909,9 @@ parse_arguments() {
             context=*)
                 KUBE_CONTEXT="${arg#*=}"
                 ;;
+            server-name=*)
+                SERVER_NAME="${arg#*=}"
+                ;;
             username=*)
                 LAST9_USERNAME="${arg#*=}"
                 ;;
@@ -1160,6 +1164,9 @@ setup_repository() {
     update_auth_token
     update_otel_endpoint
 
+    # Inject TLS server name override if provided (no-op when unset)
+    inject_collector_tls_server_name "last9-otel-collector-values.yaml"
+
     # Update deployment environment if provided
     if [ -n "$DEPLOYMENT_ENV" ]; then
         update_deployment_environment "$DEPLOYMENT_ENV"
@@ -1270,6 +1277,131 @@ update_otel_endpoint() {
         log_info "✓ OTEL endpoint placeholder replaced successfully!"
     else
         log_warn "⚠ Could not verify endpoint replacement. Please check the file manually."
+    fi
+}
+
+# Inject a TLS server_name_override under the otlp/last9 exporter of a collector
+# values file. Used when the OTLP endpoint terminates TLS behind a proxy/NLB whose
+# certificate name differs from the connection host. No-op when SERVER_NAME is empty
+# (default), so existing installs are byte-identical. Idempotent on re-run.
+inject_collector_tls_server_name() {
+    local file="$1"
+
+    [ -z "$SERVER_NAME" ] && return 0
+
+    if [ ! -f "$file" ]; then
+        log_warn "⚠ $file not found, skipping TLS server_name injection"
+        return 0
+    fi
+
+    # Idempotency guard - don't add a second tls block
+    if grep -q 'server_name_override:' "$file"; then
+        log_info "TLS server_name_override already present in $file, skipping"
+        return 0
+    fi
+
+    log_info "Injecting TLS server_name_override ($SERVER_NAME) into $file..."
+
+    if [ ! -f "$file.backup" ]; then
+        cp "$file" "$file.backup"
+        log_info "Created backup: $file.backup"
+    fi
+
+    # Does the otlp/last9 block already have a real (uncommented) tls: child? If so we
+    # add server_name_override under it rather than emitting a second tls: key (which
+    # would be a duplicate map key). Commented "# tls:" examples elsewhere don't match.
+    local has_tls
+    has_tls=$(awk '
+        /^    otlp\/last9:[[:space:]]*$/ { in_block=1; next }
+        in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
+        in_block && /^      tls:[[:space:]]*$/ { print "yes"; exit }
+    ' "$file")
+
+    if [ -n "$has_tls" ]; then
+        # Insert server_name_override as a child of the existing otlp/last9 tls: block.
+        awk -v sni="$SERVER_NAME" '
+            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
+            {
+                print
+                if (in_block && $0 ~ /^      tls:[[:space:]]*$/) {
+                    print "        server_name_override: " sni
+                }
+            }
+        ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    else
+        # No tls block yet: anchor on the otlp/last9: exporter block (4-space key) and
+        # insert a fresh tls block after its 6-space endpoint: line. This avoids the
+        # decoy endpoint: lines for health_check, the otlp receivers, and
+        # internalTelemetryViaOTLP, which live in other blocks.
+        awk -v sni="$SERVER_NAME" '
+            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
+            {
+                print
+                if (in_block && $0 ~ /^      endpoint:/) {
+                    print "      tls:"
+                    print "        insecure: false"
+                    print "        server_name_override: " sni
+                }
+            }
+        ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    fi
+
+    if grep -q "server_name_override: $SERVER_NAME" "$file"; then
+        log_info "✓ TLS server_name_override injected into $file"
+    else
+        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
+        [ -f "$file.backup" ] && cp "$file.backup" "$file"
+        rm -f "$file.tmp"
+    fi
+}
+
+# Inject a TLS serverName under the Prometheus remoteWrite entry of the monitoring
+# values file. Same purpose as inject_collector_tls_server_name, for the metrics path.
+# No-op when SERVER_NAME is empty. Idempotent on re-run.
+inject_monitoring_tls_server_name() {
+    local file="k8s-monitoring-values.yaml"
+
+    [ -z "$SERVER_NAME" ] && return 0
+
+    if [ ! -f "$file" ]; then
+        log_warn "⚠ $file not found, skipping TLS serverName injection"
+        return 0
+    fi
+
+    # Anchor the idempotency guard to the exact 10-space serverName child we emit, so an
+    # unrelated serverName: elsewhere in the values file can't cause a silent skip.
+    if grep -q '^          serverName:' "$file"; then
+        log_info "TLS serverName already present in $file, skipping"
+        return 0
+    fi
+
+    log_info "Injecting remoteWrite tlsConfig.serverName ($SERVER_NAME) into $file..."
+
+    if [ ! -f "$file.backup" ]; then
+        cp "$file" "$file.backup"
+        log_info "Created backup: $file.backup"
+    fi
+
+    # The single remoteWrite "- url:" item is indented 6 spaces; tlsConfig becomes a
+    # sibling (8 spaces) and serverName its child (10 spaces).
+    awk -v sni="$SERVER_NAME" '
+        {
+            print
+            if ($0 ~ /^      - url:/) {
+                print "        tlsConfig:"
+                print "          serverName: " sni
+            }
+        }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    if grep -q "serverName: $SERVER_NAME" "$file"; then
+        log_info "✓ TLS serverName injected into $file"
+    else
+        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
+        [ -f "$file.backup" ] && cp "$file.backup" "$file"
+        rm -f "$file.tmp"
     fi
 }
 
@@ -1970,6 +2102,9 @@ setup_last9_monitoring() {
     # Update monitoring endpoint placeholder
     update_monitoring_endpoint
 
+    # Inject TLS server name override if provided (no-op when unset)
+    inject_monitoring_tls_server_name
+
     # Load tolerations if provided (needed for kubectl patching later)
     # NOTE: We skip apply_tolerations_to_monitoring_values() to avoid yq lexer issues
     # and rely on kubectl patch approach which is more reliable
@@ -2141,6 +2276,9 @@ install_events_agent() {
     # Update auth token and endpoint in events agent values file
     update_events_agent_auth_token
     update_events_agent_endpoint
+
+    # Inject TLS server name override if provided (no-op when unset)
+    inject_collector_tls_server_name "last9-kube-events-agent-values.yaml"
 
     # Add cluster name attribute to events agent values file
     update_events_agent_cluster_name

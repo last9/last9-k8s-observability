@@ -181,6 +181,54 @@ For deploying on nodes with taints (e.g., control-plane, monitoring nodes):
 - `tolerations-nodeSelector-only.yaml` - Use nodeSelector without tolerations
 - `tolerations-gpu-nodes.yaml` - Deploy on GPU nodes with `nvidia.com/gpu` taints
 
+### TLS Server Name Override (SNI)
+
+Use `server-name=` when your OTLP / metrics endpoint terminates TLS behind a proxy or load balancer whose certificate name (CN/SAN) differs from the host in the connection URL — for example, the endpoint is a private NLB `last9nlb.example.com:443` but the certificate is issued for `ingest-internal.<region>.last9.cloud`. Without it, TLS verification fails with a hostname mismatch.
+
+```bash
+./last9-otel-setup.sh \
+  token="..." \
+  endpoint="last9nlb.example.com:443" \
+  monitoring-endpoint="https://last9nlb.example.com/v1/metrics/<cluster-id>/sender/last9/write" \
+  server-name="ingest-internal.example.last9.cloud"
+```
+
+When set, it injects (only into the files being installed):
+
+- `tls.server_name_override` (with `insecure: false`) under the `otlp/last9` exporter in the collector and events-agent configs.
+- `tlsConfig.serverName` under the Prometheus `remoteWrite` entry in the monitoring config.
+
+When omitted (the default), no TLS block is added and the values files are unchanged — fully backward compatible.
+
+> **Note:** injection is idempotent — re-running with the *same* `server-name=` is a no-op. To **change** an already-injected SNI, edit the TLS block in the values file (or remove it) before re-running; the script will not overwrite an existing override.
+
+#### Applying SNI to an already-installed cluster
+
+If a release is already deployed, extract its live values, add the TLS block, and upgrade. Use `--reuse-values=false` because `helm get values` already returns the full merged value set:
+
+```bash
+# Collector
+helm get values last9-opentelemetry-collector -n last9 -o yaml > collector-values.yaml
+# Under config.exporters.otlp/last9 add:
+#   tls:
+#     insecure: false
+#     server_name_override: ingest-internal.example.last9.cloud
+helm upgrade last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+  -n last9 -f collector-values.yaml --reuse-values=false
+
+# Events agent (same tls block under config.exporters.otlp/last9)
+helm get values last9-kube-events-agent -n last9 -o yaml > events-values.yaml
+helm upgrade last9-kube-events-agent open-telemetry/opentelemetry-collector \
+  -n last9 -f events-values.yaml --reuse-values=false
+
+# Monitoring (Prometheus): under prometheus.prometheusSpec.remoteWrite[0] add:
+#   tlsConfig:
+#     serverName: ingest-internal.example.last9.cloud
+helm get values last9-k8s-monitoring -n last9 -o yaml > monitoring-values.yaml
+helm upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+  -n last9 -f monitoring-values.yaml --reuse-values=false
+```
+
 ## Configuration Files
 
 | File | Description |
