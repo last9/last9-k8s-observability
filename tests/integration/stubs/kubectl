@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# kubectl stub for Layer 1 orchestration tests.
+# Logs every invocation to $KUBECTL_CALLS_LOG and simulates responses driven
+# by env flags so the setup script's control flow can be asserted without a
+# real cluster.
+#
+# Env flags:
+#   KUBECTL_CALLS_LOG       file to append each call to (full arg string)
+#   SIMULATE_EXISTING_CRDS  "1" → Prometheus CRDs already present on cluster
+#   MOCK_CONTEXT            value returned by `config current-context`
+
+# Record the full call (including any --context flag the wrapper injected)
+[ -n "$KUBECTL_CALLS_LOG" ] && echo "$*" >> "$KUBECTL_CALLS_LOG"
+
+# Strip a leading `--context <value>` so pattern matching sees the real verb
+args=("$@")
+if [ "${args[0]}" = "--context" ]; then
+    args=("${args[@]:2}")
+fi
+cmd="${args[*]}"
+
+case "$cmd" in
+    "config get-contexts "*)
+        # Context validation in setup_context_wrappers — always succeeds
+        exit 0
+        ;;
+    "config current-context"*)
+        echo "${MOCK_CONTEXT:-test-cluster}"
+        exit 0
+        ;;
+    "get crd alertmanagerconfigs.monitoring.coreos.com"*)
+        # Sentinel CRD presence check
+        [ "$SIMULATE_EXISTING_CRDS" = "1" ] && exit 0 || exit 1
+        ;;
+    "get crd -o name"*)
+        if [ "$SIMULATE_EXISTING_CRDS" = "1" ]; then
+            printf '%s\n' \
+                "customresourcedefinition.apiextensions.k8s.io/alertmanagerconfigs.monitoring.coreos.com" \
+                "customresourcedefinition.apiextensions.k8s.io/prometheuses.monitoring.coreos.com" \
+                "customresourcedefinition.apiextensions.k8s.io/servicemonitors.monitoring.coreos.com"
+        fi
+        exit 0
+        ;;
+    "cluster-info"*)
+        echo "Kubernetes control plane is running at https://stub:6443"
+        exit 0
+        ;;
+    "get "*)
+        # jsonpath ownership lookups, resource existence checks — return empty/ok
+        exit 0
+        ;;
+    *)
+        # create namespace/secret --dry-run, apply, label, annotate, patch, etc.
+        exit 0
+        ;;
+esac
