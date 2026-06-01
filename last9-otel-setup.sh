@@ -1855,9 +1855,20 @@ install_operator() {
 
     log_info "OpenTelemetry Operator installed!"
 
-    # Additional wait for webhook service to be available
-    log_info "Waiting for webhook service to be available..."
-    sleep 30
+    # Wait on the operator's real readiness condition instead of a blind sleep.
+    # The operator's mutating admission webhook only serves once its pod is
+    # Ready; a fixed sleep races slow clusters (e.g. GKE Autopilot, which
+    # schedules a fresh node and injects resource requests), and the downstream
+    # Instrumentation apply then fails against an unready webhook. rollout
+    # status returns as soon as the deployment is available (faster than a flat
+    # 30s on normal clusters) and blocks up to the timeout on slow ones.
+    # Non-fatal on timeout: create_instrumentation waits again and surfaces any
+    # real error.
+    log_info "Waiting for OpenTelemetry Operator deployment to be ready..."
+    if ! kubectl rollout status deployment/opentelemetry-operator \
+        -n "$NAMESPACE" --timeout="${OPERATOR_READY_TIMEOUT:-180s}"; then
+        log_warn "Operator deployment not ready within timeout; continuing (readiness is re-checked before instrumentation)."
+    fi
 }
 
 # Function to update deployment mode in values file
@@ -1970,27 +1981,46 @@ create_collector_service() {
 # Function to create instrumentation
 create_instrumentation() {
     log_info "Creating Common instrumentation..."
-    
-    # Retry logic for webhook issues
+
+    # The Instrumentation custom resource is gated by the operator's mutating
+    # admission webhook. Applying before the operator Deployment is Available
+    # (and its webhook endpoints/caBundle are populated) fails with
+    # "no endpoints available for service ...-webhook" or a TLS/x509 error.
+    # A fixed sleep races this — on slower clusters (e.g. GKE Autopilot, which
+    # schedules a fresh node and injects resource requests) the operator can
+    # take well over a minute. Wait on the real readiness condition instead of
+    # guessing with a timeout. Non-fatal on wait timeout: the apply retry loop
+    # below still runs and now surfaces the real error.
+    log_info "Waiting for OpenTelemetry Operator deployment to be Available..."
+    if ! kubectl wait --for=condition=Available deployment/opentelemetry-operator \
+        -n "$NAMESPACE" --timeout="${OPERATOR_READY_TIMEOUT:-180s}" 2>&1; then
+        log_warn "Operator deployment not reported Available within timeout; proceeding to apply (will retry and surface any error)."
+    fi
+
+    # Retry logic for residual webhook-endpoint/caBundle propagation lag.
     local max_attempts=5
     local attempt=1
-    
+    local apply_output=""
+
     while [ $attempt -le $max_attempts ]; do
         log_info "Attempt $attempt of $max_attempts to create instrumentation..."
-        
-        if kubectl apply -f instrumentation.yaml -n "$NAMESPACE" 2>/dev/null; then
+
+        # Capture stderr (do NOT discard it) so a persistent failure surfaces
+        # the real API-server rejection instead of a blind "Attempt failed".
+        if apply_output=$(kubectl apply -f instrumentation.yaml -n "$NAMESPACE" 2>&1); then
             log_info "✓ Common instrumentation created successfully!"
             return 0
-        else
-            log_warn "Attempt $attempt failed. Waiting before retry..."
-            sleep 30
-            attempt=$((attempt + 1))
         fi
+
+        log_warn "Attempt $attempt failed: $apply_output"
+        if [ $attempt -lt $max_attempts ]; then
+            sleep 15
+        fi
+        attempt=$((attempt + 1))
     done
-    
-    log_error "Failed to create instrumentation after $max_attempts attempts."
+
     log_info "You can try manually: kubectl apply -f instrumentation.yaml -n $NAMESPACE"
-    return 1
+    log_error "Failed to create instrumentation after $max_attempts attempts. Last error: $apply_output"
 }
 
 # Function to verify installation

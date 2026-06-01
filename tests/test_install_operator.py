@@ -208,6 +208,24 @@ class TestInstallOperator(unittest.TestCase):
             f"No out-of-band CRD render when CRDs absent: {calls}",
         )
 
+    def test_waits_for_operator_rollout_not_blind_sleep(self):
+        """After installing, install_operator must gate on the operator's real
+        readiness condition (a `kubectl rollout status`/`wait` on the
+        opentelemetry-operator deployment) rather than a blind sleep. A fixed
+        sleep races slow clusters (e.g. GKE Autopilot) where the webhook is not
+        yet serving, which is what made the downstream Instrumentation apply
+        fail."""
+        calls, _ = run_install("no_crds")
+        readiness = [
+            c for c in calls
+            if c.startswith(("kubectl rollout status", "kubectl wait"))
+            and "opentelemetry-operator" in c
+        ]
+        self.assertTrue(
+            readiness,
+            f"Expected a readiness wait on the operator deployment: {calls}",
+        )
+
     def test_force_apply_receives_crds_only(self):
         """The awk filter must isolate CRD docs from realistic `helm template`
         output (each doc carries a `# Source:` comment) — every
