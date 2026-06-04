@@ -34,11 +34,13 @@ jobs:
       - name: Run unit tests
         run: bats tests/unit.bats
 
-  # Layer 1 — behavioral test for the transform/topology OTTL processor.
-  # Runs the processor (extracted verbatim from the events values file) in a
-  # real otelcol-contrib container and asserts pull-mode k8sobjects payloads
-  # get topology attributes extracted. Docker, no cluster.
-  layer1-topology-transform:
+  # Layer 1 — python test suite. Includes the installer-script unit tests
+  # (test_adopt_*.py, test_install_operator.py, test_create_instrumentation.py)
+  # and the transform/topology behavioral test, which runs the processor
+  # (extracted verbatim from the events values file) in a real otelcol-contrib
+  # container and asserts pull-mode k8sobjects payloads get topology
+  # attributes extracted. Docker, no cluster.
+  layer1-pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +49,8 @@ jobs:
           python-version: '3.12'
       - name: Install test dependencies
         run: pip install pytest pyyaml
-      - name: Run topology transform test
-        run: pytest tests/test_topology_transform.py -v
+      - name: Run python tests
+        run: pytest tests/ -v
 
   # Layer 2 — real kind cluster, one mode per matrix leg (parallel, isolated).
   # CRD-conflict legs run on Helm v4 so the server-side-apply default codepath

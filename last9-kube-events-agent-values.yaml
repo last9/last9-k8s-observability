@@ -197,6 +197,9 @@ config:
             - set(attributes["k8s.resource.name"], body["metadata"]["name"])
             - set(attributes["k8s.namespace.name"], body["metadata"]["namespace"])
             - set(attributes["k8s.resource.uid"], body["metadata"]["uid"])
+            # Resource age as an attribute (the record timestamp stays observed
+            # time; see timestamp note at the end of this block)
+            - set(attributes["k8s.resource.created_at"], body["metadata"]["creationTimestamp"])
 
             # Extract ownerReferences (first owner - most K8s objects have single owner)
             - set(attributes["k8s.owner.kind"], body["metadata"]["ownerReferences"][0]["kind"]) where body["metadata"]["ownerReferences"] != nil
@@ -227,10 +230,11 @@ config:
             - set(attributes["k8s.daemonset.desired"], body["status"]["desiredNumberScheduled"]) where body["kind"] == "DaemonSet"
             - set(attributes["k8s.daemonset.ready"], body["status"]["numberReady"]) where body["kind"] == "DaemonSet"
 
-            # Extract Service-specific attributes
+            # Extract Service-specific attributes (selector stored as JSON for Pod<->Service linking)
             - set(attributes["k8s.service.name"], body["metadata"]["name"]) where body["kind"] == "Service"
             - set(attributes["k8s.service.type"], body["spec"]["type"]) where body["kind"] == "Service"
             - set(attributes["k8s.service.cluster_ip"], body["spec"]["clusterIP"]) where body["kind"] == "Service"
+            - set(attributes["k8s.service.selector"], String(body["spec"]["selector"])) where body["kind"] == "Service" and body["spec"]["selector"] != nil
 
             # Extract Ingress-specific attributes
             - set(attributes["k8s.ingress.name"], body["metadata"]["name"]) where body["kind"] == "Ingress"
@@ -296,18 +300,11 @@ config:
           mode: pull
           interval: 120s
           group: networking.k8s.io
-        # ConfigMaps referenced by Pods
-        - name: configmaps
-          mode: pull
-          interval: 120s
-        # Secrets referenced by Pods (metadata only, not data)
-        - name: secrets
-          mode: pull
-          interval: 120s
-        # PersistentVolumeClaims mounted by Pods
-        - name: persistentvolumeclaims
-          mode: pull
-          interval: 120s
+        # ConfigMaps/Secrets/PVCs intentionally not pulled: transform/topology
+        # extracts no relationship attributes from them, so they would emit
+        # orphan nodes (generic kind/name/uid only) at ingest cost. Re-add
+        # together with Pod volume-reference extraction if the dependency
+        # graph needs them.
   service:
     telemetry:
       metrics:

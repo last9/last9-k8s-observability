@@ -103,6 +103,22 @@ DEPLOYMENT_BODY = {
     "status": {"availableReplicas": 3},
 }
 
+SERVICE_BODY = {
+    "kind": "Service",
+    "apiVersion": "v1",
+    "metadata": {
+        "name": "web-svc",
+        "namespace": "default",
+        "uid": "svc-uid-321",
+        "creationTimestamp": "2026-01-01T00:00:00Z",
+    },
+    "spec": {
+        "type": "ClusterIP",
+        "clusterIP": "10.0.0.42",
+        "selector": {"app": "web"},
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Collector fixture
@@ -228,13 +244,15 @@ def read_records(outfile, expected_count, timeout=15):
 # ---------------------------------------------------------------------------
 
 def test_pull_mode_pod_attributes_extracted(collector):
-    post_logs([POD_BODY, DEPLOYMENT_BODY])
-    records = read_records(collector, expected_count=2)
+    post_logs([POD_BODY, DEPLOYMENT_BODY, SERVICE_BODY])
+    records = read_records(collector, expected_count=3)
 
     pod = next(r for r in records
                if r["attributes"].get("k8s.resource.kind") == "Pod")
     deploy = next(r for r in records
                   if r["attributes"].get("k8s.resource.kind") == "Deployment")
+    svc = next(r for r in records
+               if r["attributes"].get("k8s.resource.kind") == "Service")
 
     # Resource-level identity
     assert pod["resource"]["service.name"] == "k8s-topology"
@@ -264,7 +282,19 @@ def test_pull_mode_pod_attributes_extracted(collector):
     assert deploy["attributes"]["k8s.deployment.replicas"] == "3"
     assert deploy["attributes"]["k8s.deployment.available_replicas"] == "3"
 
+    # Service-specific attributes, incl. selector for Pod<->Service linking
+    assert svc["attributes"]["k8s.service.name"] == "web-svc"
+    assert svc["attributes"]["k8s.service.type"] == "ClusterIP"
+    assert svc["attributes"]["k8s.service.cluster_ip"] == "10.0.0.42"
+    assert "app" in svc["attributes"]["k8s.service.selector"]
+    assert "web" in svc["attributes"]["k8s.service.selector"]
+
+    # Resource age preserved as attribute, not as record timestamp
+    for rec in (pod, deploy, svc):
+        assert rec["attributes"]["k8s.resource.created_at"] == "2026-01-01T00:00:00Z"
+
     # Timestamp must NOT be backdated to creationTimestamp (statement removed:
     # pull mode re-emits every interval; observed time is correct).
     assert pod["timeUnixNano"] == "0"
     assert deploy["timeUnixNano"] == "0"
+    assert svc["timeUnixNano"] == "0"
