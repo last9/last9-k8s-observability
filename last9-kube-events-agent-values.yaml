@@ -227,7 +227,7 @@ config:
             - set(attributes["k8s.daemonset.desired"], body["status"]["desiredNumberScheduled"]) where body["kind"] == "DaemonSet"
             - set(attributes["k8s.daemonset.ready"], body["status"]["numberReady"]) where body["kind"] == "DaemonSet"
 
-            # Extract Service-specific attributes (selectors stored as JSON for querying)
+            # Extract Service-specific attributes
             - set(attributes["k8s.service.name"], body["metadata"]["name"]) where body["kind"] == "Service"
             - set(attributes["k8s.service.type"], body["spec"]["type"]) where body["kind"] == "Service"
             - set(attributes["k8s.service.cluster_ip"], body["spec"]["clusterIP"]) where body["kind"] == "Service"
