@@ -34,6 +34,22 @@ jobs:
       - name: Run unit tests
         run: bats tests/unit.bats
 
+  # Layer 1 — behavioral test for the transform/topology OTTL processor.
+  # Runs the processor (extracted verbatim from the events values file) in a
+  # real otelcol-contrib container and asserts pull-mode k8sobjects payloads
+  # get topology attributes extracted. Docker, no cluster.
+  layer1-topology-transform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: pip install pytest pyyaml
+      - name: Run topology transform test
+        run: pytest tests/test_topology_transform.py -v
+
   # Layer 2 — real kind cluster, one mode per matrix leg (parallel, isolated).
   # CRD-conflict legs run on Helm v4 so the server-side-apply default codepath
   # (the version where the cert-manager-cainjector caBundle conflict surfaces)
