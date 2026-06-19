@@ -28,15 +28,17 @@ prometheus:
     # ec2_meta_info{internal_ip, ec2_name, instance_id, instance_type, az} series
     # (one per instance). The dashboard joins it to node-exporter hosts client-side
     # on internal_ip (port-stripped `instance`). See ENG-1308.
-    # __address__ points at a discard port (9) so the scrape returns no body (up=0);
-    # only `up` is produced, renamed to ec2_meta_info — no node_* is pulled.
+    # Scrapes node-exporter (:9102) on each discovered instance, so the synthetic `up`
+    # sample is 1 for monitored host nodes (0 for account instances not running it).
+    # metric_relabel below keeps ONLY `up` -> renamed to ec2_meta_info, dropping the
+    # node_* payload, so nothing leaks. Value is the idiomatic info-metric 1.
     additionalScrapeConfigs:
       - job_name: ec2-metadata
         scrape_interval: 5m
         scrape_timeout: 10s
         ec2_sd_configs:
           - region: <AWS_REGION>   # TODO: replace with the test-cluster region
-            port: 9                # discard port → up=0, labels-only
+            port: 9102             # node-exporter port -> up=1 for host nodes
             refresh_interval: 5m
         # NOTE: additionalScrapeConfigs is raw Prometheus config → snake_case
         # (relabel_configs / metric_relabel_configs / source_labels / target_label),
