@@ -1,4 +1,4 @@
-# IAM for the `ec2-metadata` scrape job (ENG-1308)
+# IAM for the `ec2-metadata` scrape job
 
 The `ec2_sd` scrape job in `k8s-monitoring-values.yaml` calls `ec2:DescribeInstances`. The Prometheus pod needs AWS creds for that call. Helm cannot create IAM (it's an AWS control-plane resource), so provision the role/policy with **one** of the two paths below, then point the values file at it.
 
