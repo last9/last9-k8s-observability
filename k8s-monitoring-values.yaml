@@ -38,7 +38,7 @@ prometheus:
             key: password
         writeRelabelConfigs:
           - sourceLabels: [__name__]
-            regex: "up|kube_.*|container_.*|node_.*"  # Keep relevant metrics
+            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*"  # Keep relevant metrics (+ PVC volume fill from kubelet)
             action: keep
 
 # Keep kube-state-metrics
