@@ -8,6 +8,12 @@ grafana:
 prometheus:
   enabled: true
   agentMode: true
+  # IRSA: grants the Prometheus pod ec2:DescribeInstances for the ec2-metadata scrape job below.
+  # The IAM policy MUST be Condition-scoped (region and/or ec2:ResourceTag/*) — DescribeInstances
+  # ignores Resource ARNs, so an unconditioned policy can enumerate the whole account.
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: <IRSA_ROLE_ARN>  # TODO: replace with the test-cluster role ARN
   prometheusSpec:
     # Enable only necessary scrape configs
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -17,6 +23,47 @@ prometheus:
     # Global external labels to add to all metrics
     externalLabels:
       cluster: my-cluster-name # Replace with your cluster name
+
+    # EC2 host metadata: discover instances via the AWS API and emit a thin
+    # ec2_meta_info{internal_ip, ec2_name, instance_id, instance_type, az} series
+    # (one per instance). The dashboard joins it to node-exporter hosts client-side
+    # on internal_ip (port-stripped `instance`). See ENG-1308.
+    # __address__ points at a discard port (9) so the scrape returns no body (up=0);
+    # only `up` is produced, renamed to ec2_meta_info — no node_* is pulled.
+    additionalScrapeConfigs:
+      - job_name: ec2-metadata
+        scrape_interval: 5m
+        scrape_timeout: 10s
+        ec2_sd_configs:
+          - region: <AWS_REGION>   # TODO: replace with the test-cluster region
+            port: 9                # discard port → up=0, labels-only
+            refresh_interval: 5m
+        # NOTE: additionalScrapeConfigs is raw Prometheus config → snake_case
+        # (relabel_configs / metric_relabel_configs / source_labels / target_label),
+        # unlike remoteWrite.writeRelabelConfigs above which is the operator CRD camelCase form.
+        relabel_configs:
+          - source_labels: [__meta_ec2_private_ip]
+            target_label: internal_ip
+          - source_labels: [__meta_ec2_tag_Name]
+            target_label: ec2_name
+          - source_labels: [__meta_ec2_instance_id]
+            target_label: instance_id
+          - source_labels: [__meta_ec2_instance_type]
+            target_label: instance_type
+          - source_labels: [__meta_ec2_availability_zone]
+            target_label: az
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            regex: up
+            action: keep            # only `up` survives → no node_* from this job
+          - source_labels: [__name__]
+            regex: up
+            target_label: __name__
+            replacement: ec2_meta_info
+          - source_labels: [ec2_name]
+            regex: '(.{1,63}).*'
+            target_label: ec2_name
+            replacement: '${1}'     # bound Name length (cardinality + sanitization)
 
     remoteWrite:
       - url: "{{YOUR_MONITORING_ENDPOINT}}"
@@ -38,7 +85,7 @@ prometheus:
             key: password
         writeRelabelConfigs:
           - sourceLabels: [__name__]
-            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*"  # Keep relevant metrics (+ PVC volume fill from kubelet)
+            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|ec2_meta_info"  # Keep relevant metrics (+ PVC volume fill from kubelet)  (+ EC2 host metadata)
             action: keep
 
 # Keep kube-state-metrics
