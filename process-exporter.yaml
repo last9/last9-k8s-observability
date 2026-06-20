@@ -1,6 +1,5 @@
-# ⚠️ DEPLOY EXACTLY ONE process-metrics path: THIS (process-exporter) OR the OTel
-#    overlay (last9-otel-collector-process-values.yaml) — never both on the same host
-#    (duplicate process metrics, different label schemas, double-counting).
+# Per-process metrics for the kube-prometheus-stack path. (Command-level per-PID detail
+#    via an OTel hostmetrics process scraper is a separate future effort — not in this PR.)
 # NOTE: namespace below is `monitoring` — change to your kube-prometheus-stack install
 #    namespace. The PodMonitor must be in a namespace the Operator watches.
 #
