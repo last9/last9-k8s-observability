@@ -1,3 +1,9 @@
+# ⚠️ DEPLOY EXACTLY ONE process-metrics path: THIS (process-exporter) OR the OTel
+#    overlay (last9-otel-collector-process-values.yaml) — never both on the same host
+#    (duplicate process metrics, different label schemas, double-counting).
+# NOTE: namespace below is `monitoring` — change to your kube-prometheus-stack install
+#    namespace. The PodMonitor must be in a namespace the Operator watches.
+#
 # process-exporter (ncabatoff) — per-process metrics for the kube-prometheus-stack path.
 # Emits namedprocess_namegroup_* (grouped by process comm). The Last9 Hosts → Process
 # tab already renders these on node-exporter hosts (flat list: name/CPU/mem/count/state),
@@ -41,7 +47,7 @@ spec:
       hostPID: true   # see all processes on the node
       containers:
         - name: process-exporter
-          image: ncabatoff/process-exporter:0.8.6   # verify latest stable tag
+          image: ncabatoff/process-exporter:0.8.6   # TODO pin @sha256:<digest>; personal Docker Hub repo — mirror for prod
           args:
             - --config.path=/config/config.yml
             - --procfs=/host/proc
@@ -70,8 +76,10 @@ spec:
         - name: config
           configMap:
             name: process-exporter-config
+      nodeSelector:
+        kubernetes.io/os: linux   # Windows /proc differs; Fargate has no /proc -> avoid CrashLoop
       tolerations:
-        - operator: Exists   # run on every node, incl. tainted
+        - operator: Exists   # every (linux) node incl. tainted, per nodeSelector
 ---
 apiVersion: v1
 kind: Service

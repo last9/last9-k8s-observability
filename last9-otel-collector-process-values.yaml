@@ -1,3 +1,8 @@
+# ⚠️ DEPLOY EXACTLY ONE process-metrics path: THIS overlay OR process-exporter.yaml —
+#    never both on the same host (duplicate process metrics, double-counting).
+# Requires the base values to define: extensions.health_check, processors.batch
+#    (referenced in the service block below). Layer, don't apply standalone.
+#
 # Process-metrics overlay for the Last9 OpenTelemetry Collector (daemonset).
 # Adds the hostmetrics `process` scraper so each host emits per-process metrics with
 # command-level attributes (executable, command line, owner, pid). Layer on the base:
@@ -47,9 +52,16 @@ config:
             process.open_file_descriptors:
               enabled: true
           # Optionally trim noise by executable:
-          # exclude:
-          #   names: [ "containerd-shim", "pause" ]
-          #   match_type: regexp
+          # ⚠️ SECURITY + CARDINALITY — resolve before un-deferring this overlay:
+          #  - process.command_line (default-on; promoted to a PRW label by
+          #    resource_to_telemetry_conversion) can carry secrets (--password=, tokens).
+          #    Add a transform/redaction processor or drop the attribute before prod.
+          #  - process.pid as a label = a new series every restart (unbounded). Strip it
+          #    unless the per-PID tree needs it; cardinality-test at fleet scale first.
+          # Cardinality control (per-PID): exclude noisy short-lived / runtime procs.
+          exclude:
+            names: [ "containerd-shim.*", "pause", "runc.*" ]
+            match_type: regexp
 
   processors:
     # Stamp the node IP so process_* can be joined to the node-exporter host row.

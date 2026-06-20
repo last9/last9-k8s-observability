@@ -13,7 +13,7 @@ prometheus:
   # ignores Resource ARNs, so an unconditioned policy can enumerate the whole account.
   serviceAccount:
     annotations:
-      eks.amazonaws.com/role-arn: <IRSA_ROLE_ARN>  # TODO: replace with the test-cluster role ARN
+      eks.amazonaws.com/role-arn: {{IRSA_ROLE_ARN}}  # replace with your cluster's role ARN (Path B / IRSA; omit for Pod Identity)
   prometheusSpec:
     # Enable only necessary scrape configs
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -31,15 +31,24 @@ prometheus:
     # Scrapes node-exporter (:9102) on each discovered instance, so the synthetic `up`
     # sample is 1 for monitored host nodes (0 for account instances not running it).
     # metric_relabel below keeps ONLY `up` -> renamed to ec2_meta_info, dropping the
-    # node_* payload, so nothing leaks. Value is the idiomatic info-metric 1.
+    # node_* payload, so nothing leaks. The JOIN uses label PRESENCE, not value:
+    # `up` is 1 for nodes scraped OK, 0 for instances not on :9102 — do not query `== 1`.
     additionalScrapeConfigs:
       - job_name: ec2-metadata
         scrape_interval: 5m
         scrape_timeout: 10s
         ec2_sd_configs:
-          - region: <AWS_REGION>   # TODO: replace with the test-cluster region
-            port: 9102             # node-exporter port -> up=1 for host nodes
+          - region: {{AWS_REGION}}   # replace with your cluster's region
+            port: 9102               # MUST match prometheus-node-exporter.service.port (below; chart default 9100)
             refresh_interval: 5m
+            # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
+            # Filter to running instances to cut stopped/terminated noise + connection attempts.
+            # Scope to only monitored hosts with a tag filter, e.g.:
+            #   - name: tag:last9-monitored
+            #     values: [ "true" ]
+            filters:
+              - name: instance-state-name
+                values: [ running ]
         # NOTE: additionalScrapeConfigs is raw Prometheus config → snake_case
         # (relabel_configs / metric_relabel_configs / source_labels / target_label),
         # unlike remoteWrite.writeRelabelConfigs above which is the operator CRD camelCase form.
@@ -59,7 +68,8 @@ prometheus:
           - source_labels: [__meta_ec2_architecture]
             target_label: arch
           # AWS tags -> host labels (the dashboard already groups/filters on these).
-          # Tag keys are case-sensitive; match your AWS tag key casing exactly.
+          # CUSTOMISE: these assume tag keys Environment/Team/Service — adjust to your
+          # org's keys/casing (e.g. environment, env). Missing tags -> empty labels.
           - source_labels: [__meta_ec2_tag_Environment]
             target_label: environment
           - source_labels: [__meta_ec2_tag_Team]
