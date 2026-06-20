@@ -66,6 +66,16 @@ prometheus:
             target_label: team
           - source_labels: [__meta_ec2_tag_Service]
             target_label: service
+          # ASG name: the aws:autoscaling:groupName tag (key sanitized to underscores
+          # in the meta-label). Identifies node fleets — DD's `autoscaling_group`.
+          - source_labels: [__meta_ec2_tag_aws_autoscaling_groupName]
+            target_label: asg
+          - source_labels: [__meta_ec2_instance_lifecycle]
+            target_label: lifecycle   # spot / on-demand (empty = on-demand)
+          - source_labels: [__meta_ec2_vpc_id]
+            target_label: vpc_id
+          - source_labels: [__meta_ec2_subnet_id]
+            target_label: subnet_id
         metric_relabel_configs:
           - source_labels: [__name__]
             regex: up
