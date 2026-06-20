@@ -1,0 +1,110 @@
+# Process-metrics overlay for the Last9 OpenTelemetry Collector (daemonset).
+# Adds the hostmetrics `process` scraper so each host emits per-process metrics with
+# command-level attributes (executable, command line, owner, pid). Layer on the base:
+#   helm upgrade ... --values last9-otel-collector-values.yaml --values last9-otel-collector-process-values.yaml
+#
+# Requires mode: daemonset (base already sets it) + host /proc access + root.
+# process_* join to node-exporter hosts in the dashboard on `internal_ip` (ENG-1300).
+
+# Run as root with host PID namespace so the scraper can read every process.
+securityContext:
+  runAsUser: 0
+  runAsGroup: 0
+hostPID: true
+
+# Mount the host /proc read-only; hostmetrics reads it via root_path: /hostfs.
+extraVolumes:
+  - name: hostfs-proc
+    hostPath:
+      path: /proc
+extraVolumeMounts:
+  - name: hostfs-proc
+    mountPath: /hostfs/proc
+    readOnly: true
+
+# Node IP for the internal_ip resource attribute (the host-join key).
+extraEnvs:
+  - name: NODE_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.hostIP
+
+config:
+  receivers:
+    hostmetrics/process:
+      root_path: /hostfs
+      collection_interval: 30s
+      scrapers:
+        process:
+          # Cardinality / noise control — don't error on processes we can't read.
+          mute_process_exe_error: true
+          mute_process_io_error: true
+          mute_process_user_error: true
+          # Default-on resource attrs already cover the dashboard group-by:
+          # process.executable.name/path, process.command_line, process.owner,
+          # process.pid, process.parent_pid.
+          metrics:
+            process.open_file_descriptors:
+              enabled: true
+          # Optionally trim noise by executable:
+          # exclude:
+          #   names: [ "containerd-shim", "pause" ]
+          #   match_type: regexp
+
+  processors:
+    # Stamp the node IP so process_* can be joined to the node-exporter host row.
+    resource/process_identity:
+      attributes:
+        - key: internal_ip
+          value: ${env:NODE_IP}
+          action: upsert
+
+  exporters:
+    prometheusremotewrite/last9:
+      endpoint: "{{LAST9_METRICS_ENDPOINT}}"
+      auth:
+        authenticator: basicauth/last9_metrics
+      # CRITICAL: turns process.* + internal_ip resource attributes into PRW labels
+      # (executable name, command_line, owner, pid, internal_ip). Without this they
+      # land in target_info and the dashboard group-by breaks.
+      resource_to_telemetry_conversion:
+        enabled: true
+      # Keep the OTel->PRW default names (process.cpu.time -> process_cpu_time_seconds_total,
+      # process.memory.usage -> process_memory_usage_bytes) that the dashboard queries.
+      # VERIFY on deploy: process.open_file_descriptors -> exact PRW name vs the dashboard's
+      # process_open_file_descriptor_count panel.
+      add_metric_suffixes: true
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 300s
+
+  extensions:
+    basicauth/last9_metrics:
+      client_auth:
+        username: "{{LAST9_METRICS_USERNAME}}"
+        password: "{{LAST9_METRICS_PASSWORD}}"
+
+  service:
+    extensions:
+      - health_check
+      - basicauth/last9_metrics
+    pipelines:
+      metrics/process:
+        receivers:
+          - hostmetrics/process
+        processors:
+          - resource/process_identity
+          - batch
+        exporters:
+          - prometheusremotewrite/last9
+
+# Per-PID series can be high cardinality; give the daemonset headroom.
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
