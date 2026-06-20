@@ -109,7 +109,7 @@ prometheus:
             key: password
         writeRelabelConfigs:
           - sourceLabels: [__name__]
-            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|ec2_meta_info"  # Keep relevant metrics (+ PVC volume fill from kubelet)  (+ EC2 host metadata)
+            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|ec2_meta_info|namedprocess_.*"  # + EC2 host metadata + process-exporter
             action: keep
 
 # Keep kube-state-metrics

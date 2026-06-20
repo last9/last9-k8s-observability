@@ -1,0 +1,104 @@
+# process-exporter (ncabatoff) — per-process metrics for the kube-prometheus-stack path.
+# Emits namedprocess_namegroup_* (grouped by process comm). The Last9 Hosts → Process
+# tab already renders these on node-exporter hosts (flat list: name/CPU/mem/count/state),
+# so NO dashboard change is needed. Command-line / owner / per-PID tree is the OTel
+# scraper's job (see last9-otel-collector-process-values.yaml) — a later upgrade.
+#
+# Apply alongside kube-prometheus-stack; the Prometheus Operator scrapes via the
+# PodMonitor below (their values set podMonitorSelectorNilUsesHelmValues: false).
+# Ensure the remote-write keep-regex includes `namedprocess_.*` (done in k8s-monitoring-values.yaml).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: process-exporter-config
+  namespace: monitoring
+data:
+  config.yml: |
+    # Group every process by its command name (basename). Bounded cardinality
+    # (one group per distinct comm). Add cmdline-regex groups for finer service splits.
+    process_names:
+      - name: "{{.Comm}}"
+        cmdline:
+          - ".+"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  template:
+    metadata:
+      labels:
+        app: process-exporter
+    spec:
+      hostPID: true   # see all processes on the node
+      containers:
+        - name: process-exporter
+          image: ncabatoff/process-exporter:0.8.6   # verify latest stable tag
+          args:
+            - --config.path=/config/config.yml
+            - --procfs=/host/proc
+          ports:
+            - name: metrics
+              containerPort: 9256
+          securityContext:
+            runAsUser: 0   # root: read other users' /proc
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: config
+          configMap:
+            name: process-exporter-config
+      tolerations:
+        - operator: Exists   # run on every node, incl. tainted
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    app: process-exporter
+  ports:
+    - name: metrics
+      port: 9256
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
