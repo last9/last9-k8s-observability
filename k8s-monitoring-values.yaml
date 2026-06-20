@@ -54,6 +54,18 @@ prometheus:
             target_label: instance_type
           - source_labels: [__meta_ec2_availability_zone]
             target_label: az
+          - source_labels: [__meta_ec2_region]
+            target_label: region
+          - source_labels: [__meta_ec2_architecture]
+            target_label: arch
+          # AWS tags -> host labels (the dashboard already groups/filters on these).
+          # Tag keys are case-sensitive; match your AWS tag key casing exactly.
+          - source_labels: [__meta_ec2_tag_Environment]
+            target_label: environment
+          - source_labels: [__meta_ec2_tag_Team]
+            target_label: team
+          - source_labels: [__meta_ec2_tag_Service]
+            target_label: service
         metric_relabel_configs:
           - source_labels: [__name__]
             regex: up
