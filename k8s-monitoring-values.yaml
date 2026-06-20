@@ -28,18 +28,17 @@ prometheus:
     # ec2_meta_info{internal_ip, ec2_name, instance_id, instance_type, az} series
     # (one per instance). The dashboard joins it to node-exporter hosts client-side
     # on internal_ip (port-stripped `instance`). See ENG-1308.
-    # Scrapes node-exporter (:9102) on each discovered instance, so the synthetic `up`
-    # sample is 1 for monitored host nodes (0 for account instances not running it).
-    # metric_relabel below keeps ONLY `up` -> renamed to ec2_meta_info, dropping the
-    # node_* payload, so nothing leaks. The JOIN uses label PRESENCE, not value:
-    # `up` is 1 for nodes scraped OK, 0 for instances not on :9102 — do not query `== 1`.
+    # __address__ points at a discard port (9): the scrape fails fast (connection
+    # refused) so NO node-exporter payload is pulled and there is NO double-scrape of
+    # node-exporter. metric_relabel keeps ONLY the synthetic `up` -> renamed to
+    # ec2_meta_info. The JOIN uses label PRESENCE, not value (up is 0 here) -- never query `== 1`.
     additionalScrapeConfigs:
       - job_name: ec2-metadata
         scrape_interval: 5m
         scrape_timeout: 10s
         ec2_sd_configs:
           - region: "{{AWS_REGION}}"   # replace with your cluster's region
-            port: 9102               # MUST match prometheus-node-exporter.service.port (below; chart default 9100)
+            port: 9                  # discard port: scrape fails fast (up=0); avoids node-exporter double-scrape
             refresh_interval: 5m
             # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
             # Filter to running instances to cut stopped/terminated noise + connection attempts.
