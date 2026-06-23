@@ -45,7 +45,7 @@ prometheus:
         scrape_interval: 5m
         scrape_timeout: 10s
         ec2_sd_configs:
-          - region: "{{AWS_REGION}}"   # replace with your cluster's region
+          - region: "REPLACE_WITH_AWS_REGION"   # set your region, e.g. us-east-1. NO {{ }}: the chart tpl-renders additionalScrapeConfigs, so Go-template braces fail to parse.
             port: 9                  # discard port: scrape fails fast (up=0); avoids node-exporter double-scrape
             refresh_interval: 5m
             # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
