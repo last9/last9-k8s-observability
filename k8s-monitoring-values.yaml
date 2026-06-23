@@ -12,8 +12,12 @@ prometheus:
   # The IAM policy MUST be Condition-scoped (region and/or ec2:ResourceTag/*) — DescribeInstances
   # ignores Resource ARNs, so an unconditioned policy can enumerate the whole account.
   serviceAccount:
-    annotations:
-      eks.amazonaws.com/role-arn: "{{IRSA_ROLE_ARN}}"  # replace with your cluster's role ARN (Path B / IRSA; omit for Pod Identity)
+    # Pod Identity (recommended) needs NO annotation — leave this empty.
+    # IRSA (Path B): uncomment and paste the LITERAL role ARN below.
+    # Do NOT use {{ }} here: kube-prometheus-stack runs `tpl` on these annotations, so
+    # Go-template braces are evaluated and the chart fails to render. Use a literal ARN.
+    annotations: {}
+      # eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>  # IRSA only
   prometheusSpec:
     # Enable only necessary scrape configs
     serviceMonitorSelectorNilUsesHelmValues: false
