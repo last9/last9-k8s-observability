@@ -24,14 +24,18 @@ prometheus:
     externalLabels:
       cluster: my-cluster-name # Replace with your cluster name
 
-    # EC2 host metadata: discover instances via the AWS API and emit a thin
-    # ec2_meta_info{internal_ip, ec2_name, instance_id, instance_type, az} series
-    # (one per instance). The dashboard joins it to node-exporter hosts client-side
-    # on internal_ip (port-stripped `instance`). See ENG-1308.
+    # EC2 host metadata: discover instances via the AWS API and carry the metadata
+    # as labels on the discovery job's `up` series (one per instance) —
+    # up{job="ec2-metadata", internal_ip, ec2_name, instance_id, instance_type, az, ...}.
+    # The dashboard joins it to node-exporter hosts client-side on internal_ip
+    # (port-stripped `instance`); it reads label PRESENCE, never the value. See ENG-1308.
     # __address__ points at a discard port (9): the scrape fails fast (connection
-    # refused) so NO node-exporter payload is pulled and there is NO double-scrape of
-    # node-exporter. metric_relabel keeps ONLY the synthetic `up` -> renamed to
-    # ec2_meta_info. The JOIN uses label PRESENCE, not value (up is 0 here) -- never query `== 1`.
+    # refused) so NO node-exporter payload is pulled and there is NO double-scrape.
+    # NOTE: there is intentionally NO metric_relabel rename to `ec2_meta_info` — `up` and
+    # scrape_* are SYNTHETIC metrics Prometheus appends AFTER metric_relabel_configs, so
+    # they cannot be renamed/relabeled there (proof: scrape_samples_post_metric_relabeling).
+    # The discard-port scrape yields only `up` (no node_*), and remote-write keeps `up`,
+    # so the metadata flows as `up{job="ec2-metadata"}` with no extra processing.
     additionalScrapeConfigs:
       - job_name: ec2-metadata
         scrape_interval: 5m
@@ -55,7 +59,9 @@ prometheus:
           - source_labels: [__meta_ec2_private_ip]
             target_label: internal_ip
           - source_labels: [__meta_ec2_tag_Name]
+            regex: '(.{1,63}).*'
             target_label: ec2_name
+            replacement: '${1}'      # bound Name length (cardinality + sanitization)
           - source_labels: [__meta_ec2_instance_id]
             target_label: instance_id
           - source_labels: [__meta_ec2_instance_type]
@@ -83,20 +89,11 @@ prometheus:
             target_label: lifecycle   # spot / on-demand (empty = on-demand)
           - source_labels: [__meta_ec2_vpc_id]
             target_label: vpc_id
+          # subnet_id meta-label can arrive comma-wrapped (",subnet-…,") — extract the id.
           - source_labels: [__meta_ec2_subnet_id]
+            regex: ',*([^,]+),*'
             target_label: subnet_id
-        metric_relabel_configs:
-          - source_labels: [__name__]
-            regex: up
-            action: keep            # only `up` survives → no node_* from this job
-          - source_labels: [__name__]
-            regex: up
-            target_label: __name__
-            replacement: ec2_meta_info
-          - source_labels: [ec2_name]
-            regex: '(.{1,63}).*'
-            target_label: ec2_name
-            replacement: '${1}'     # bound Name length (cardinality + sanitization)
+            replacement: '${1}'
 
     remoteWrite:
       - url: "{{YOUR_MONITORING_ENDPOINT}}"
@@ -118,7 +115,7 @@ prometheus:
             key: password
         writeRelabelConfigs:
           - sourceLabels: [__name__]
-            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|ec2_meta_info|namedprocess_.*"  # + EC2 host metadata + process-exporter
+            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|namedprocess_.*"  # `up` carries EC2 host metadata (job=ec2-metadata) + process-exporter
             action: keep
 
 # Keep kube-state-metrics

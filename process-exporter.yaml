@@ -46,7 +46,7 @@ spec:
       hostPID: true   # see all processes on the node
       containers:
         - name: process-exporter
-          image: ncabatoff/process-exporter:0.8.6   # TODO pin @sha256:<digest>; personal Docker Hub repo — mirror for prod
+          image: ncabatoff/process-exporter:0.8.7   # TODO pin @sha256:<digest>; personal Docker Hub repo — mirror for prod
           args:
             - --config.path=/config/config.yml
             - --procfs=/host/proc
