@@ -109,3 +109,10 @@ spec:
   podMetricsEndpoints:
     - port: metrics
       interval: 30s
+      relabelings:
+        # Stamp the node's host IP as `internal_ip` so namedprocess_* joins to the host.
+        # process-exporter's own `instance` is the pod ENI IP (VPC-CNI), not the node IP,
+        # so the Hosts -> Process tab joins on internal_ip = node-exporter instance IP
+        # = ec2_meta internal_ip (same key the EC2 metadata uses). See ENG-1300.
+        - sourceLabels: [__meta_kubernetes_pod_host_ip]
+          targetLabel: internal_ip
