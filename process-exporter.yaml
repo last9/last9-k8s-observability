@@ -1,0 +1,118 @@
+# Per-process metrics for the kube-prometheus-stack path. (Command-level per-PID detail
+#    via an OTel hostmetrics process scraper is a separate future effort — not in this PR.)
+# NOTE: namespace below is `monitoring` — change to your kube-prometheus-stack install
+#    namespace. The PodMonitor must be in a namespace the Operator watches.
+#
+# process-exporter (ncabatoff) — per-process metrics for the kube-prometheus-stack path.
+# Emits namedprocess_namegroup_* (grouped by process comm). The Last9 Hosts → Process
+# tab already renders these on node-exporter hosts (flat list: name/CPU/mem/count/state),
+# so NO dashboard change is needed. Command-line / owner / per-PID tree is the OTel
+# scraper's job (see last9-otel-collector-process-values.yaml) — a later upgrade.
+#
+# Apply alongside kube-prometheus-stack; the Prometheus Operator scrapes via the
+# PodMonitor below (their values set podMonitorSelectorNilUsesHelmValues: false).
+# Ensure the remote-write keep-regex includes `namedprocess_.*` (done in k8s-monitoring-values.yaml).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: process-exporter-config
+  namespace: monitoring
+data:
+  config.yml: |
+    # Group every process by its command name (basename). Bounded cardinality
+    # (one group per distinct comm). Add cmdline-regex groups for finer service splits.
+    process_names:
+      - name: "{{.Comm}}"
+        cmdline:
+          - ".+"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  template:
+    metadata:
+      labels:
+        app: process-exporter
+    spec:
+      hostPID: true   # see all processes on the node
+      containers:
+        - name: process-exporter
+          image: ncabatoff/process-exporter:0.8.7   # TODO pin @sha256:<digest>; personal Docker Hub repo — mirror for prod
+          args:
+            - --config.path=/config/config.yml
+            - --procfs=/host/proc
+          ports:
+            - name: metrics
+              containerPort: 9256
+          securityContext:
+            runAsUser: 0   # root: read other users' /proc
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: config
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: config
+          configMap:
+            name: process-exporter-config
+      nodeSelector:
+        kubernetes.io/os: linux   # Windows /proc differs; Fargate has no /proc -> avoid CrashLoop
+      tolerations:
+        - operator: Exists   # every (linux) node incl. tainted, per nodeSelector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    app: process-exporter
+  ports:
+    - name: metrics
+      port: 9256
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: process-exporter
+  namespace: monitoring
+  labels:
+    app: process-exporter
+spec:
+  selector:
+    matchLabels:
+      app: process-exporter
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      relabelings:
+        # Stamp the node's host IP as `internal_ip` so namedprocess_* joins to the host.
+        # process-exporter's own `instance` is the pod ENI IP (VPC-CNI), not the node IP,
+        # so the Hosts -> Process tab joins on internal_ip = node-exporter instance IP
+        # = ec2_meta internal_ip (same key the EC2 metadata uses). See ENG-1300.
+        - sourceLabels: [__meta_kubernetes_pod_host_ip]
+          targetLabel: internal_ip
