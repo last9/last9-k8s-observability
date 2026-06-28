@@ -49,11 +49,11 @@ presets:
   # See https://opentelemetry.io/docs/kubernetes/collector/components/#kubernetes-attributes-processor for details on the receiver.
   kubernetesAttributes:
     enabled: true
-    # When enabled the processor will extract all labels for an associated pod and add them as resource attributes.
-    # The label's exact name will be the key.
+    # Logs keep the full pod label/annotation set (useful for log filtering/correlation).
+    # Metrics are trimmed separately on the metrics pipeline (see transform/metrics/trim
+    # in config.processors) so metric samples don't carry the wide label set and
+    # ingestion volume stays low. This preset is global; the per-pipeline trim differentiates them.
     extractAllPodLabels: true
-    # When enabled the processor will extract all annotations for an associated pod and add them as resource attributes.
-    # The annotation's exact name will be the key.
     extractAllPodAnnotations: true
   # Configures the collector to collect node, pod, and container metrics from the API server on a kubelet.
   # Adds the kubeletstats receiver to the metrics pipeline
@@ -167,6 +167,44 @@ config:
       limit_percentage: 85
       # By default spike_limit_mib is set to 15% of ".Values.resources.limits.memory"
       spike_limit_percentage: 15
+    # Volume control for METRICS ONLY (wired into the metrics pipeline below; logs keep
+    # the full attribute set). Drops resource attributes that widen every metric
+    # sample but are rarely a useful metric dimension:
+    #   - SDK/runtime metadata (telemetry.*, process.*, os.*, host.arch, service.version)
+    #   - the pod label/annotation passthrough (app.kubernetes.io/*, *.istio.io/*,
+    #     kubectl.kubernetes.io/*, prometheus.io/*, pod-template-hash)
+    #   - k8s.pod.ip (per-pod churn, not queried on metrics)
+    # KEEPS (do not add to the delete list):
+    #   - host.name        -> Discover Host identity on the OTel-collector path
+    #   - service.instance.id -> per-instance metric series identity (dropping it would
+    #                            collapse replicas into colliding series at the backend)
+    #   - k8s.namespace.name / k8s.deployment.name / k8s.node.name / k8s.pod.name -> useful dims
+    transform/metrics/trim:
+      error_mode: ignore
+      metric_statements:
+        - context: resource
+          statements:
+            - delete_key(attributes, "telemetry.sdk.name")
+            - delete_key(attributes, "telemetry.sdk.language")
+            - delete_key(attributes, "telemetry.sdk.version")
+            - delete_key(attributes, "telemetry.distro.name")
+            - delete_key(attributes, "telemetry.distro.version")
+            - delete_key(attributes, "process.pid")
+            - delete_key(attributes, "process.command_line")
+            - delete_key(attributes, "process.command_args")
+            - delete_key(attributes, "process.executable.path")
+            - delete_key(attributes, "process.runtime.description")
+            - delete_key(attributes, "process.runtime.version")
+            - delete_key(attributes, "os.type")
+            - delete_key(attributes, "os.description")
+            - delete_key(attributes, "os.version")
+            - delete_key(attributes, "host.arch")
+            - delete_key(attributes, "service.version")
+            - delete_key(attributes, "k8s.pod.ip")
+            - delete_matching_keys(attributes, "^(app|kubectl)\\.kubernetes\\.io/.*")
+            - delete_matching_keys(attributes, "\\.?istio\\.io/.*")
+            - delete_matching_keys(attributes, "^prometheus\\.io/.*")
+            - delete_key(attributes, "pod-template-hash")
   receivers:
     otlp:
       protocols:
@@ -211,6 +249,7 @@ config:
           - otlp
           - prometheus
         processors:
+          - transform/metrics/trim
           - batch
         exporters:
           - otlp/last9
