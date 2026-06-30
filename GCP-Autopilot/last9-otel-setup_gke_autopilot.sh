@@ -157,6 +157,17 @@ if [ -z "$DEPLOYMENT_ENV" ] && [ -t 0 ]; then
     fi
 fi
 
+# Trim surrounding whitespace, then reject values outside a safe identifier charset.
+# DEPLOYMENT_ENV is interpolated raw into a sed replacement (|, &, \ corrupt it), awk -v,
+# and OTTL string literals (a " breaks the literal) below — one guard closes all sinks.
+# (log_error here does not exit, so exit explicitly.) (#review)
+DEPLOYMENT_ENV="$(printf '%s' "$DEPLOYMENT_ENV" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+case "$DEPLOYMENT_ENV" in
+    *[!A-Za-z0-9._-]*)
+        log_error "Invalid deployment environment '$DEPLOYMENT_ENV'. Use only letters, digits, '.', '_', '-'."
+        exit 1 ;;
+esac
+
 log_info "=========================================="
 log_info "Starting GKE Autopilot OpenTelemetry installation..."
 log_info "=========================================="
@@ -308,7 +319,7 @@ if [ -n "$DEPLOYMENT_ENV" ]; then
             prev = $0; next
         }
         { prev = $0; print }
-    ' "$INSTRUMENTATION_FILE" > "${INSTRUMENTATION_FILE}.awk" && mv "${INSTRUMENTATION_FILE}.awk" "$INSTRUMENTATION_FILE"
+    ' "$INSTRUMENTATION_FILE" > "${INSTRUMENTATION_FILE}.awk.tmp" && mv "${INSTRUMENTATION_FILE}.awk.tmp" "$INSTRUMENTATION_FILE"
 else
     log_info "Creating OpenTelemetry Instrumentation (deployment.environment unset)..."
 fi
@@ -325,7 +336,9 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             sleep 10
         else
             log_error "Failed to create instrumentation after $MAX_RETRIES attempts"
-            log_warn "You can manually apply it later: kubectl apply -f $INSTRUMENTATION_FILE -n $NAMESPACE"
+            # $INSTRUMENTATION_FILE is a *.tmp removed by the EXIT trap — point at the source
+            # file (re-run with env=<environment> to re-apply deployment.environment). (#review)
+            log_warn "You can manually apply it later: kubectl apply -f $SCRIPT_DIR/instrumentation.yaml -n $NAMESPACE"
         fi
     fi
 done

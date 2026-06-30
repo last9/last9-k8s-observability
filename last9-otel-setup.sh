@@ -1429,10 +1429,21 @@ prompt_deployment_environment() {
 update_deployment_environment() {
     local env="$1"
 
+    # Trim surrounding whitespace; a whitespace-only value is treated as unset.
+    env="$(printf '%s' "$env" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
     if [ -z "$env" ]; then
-        log_info "No deployment environment specified, using default values"
+        log_info "No deployment environment specified — deployment.environment will be omitted"
         return 0
     fi
+
+    # Reject values outside a safe identifier charset. env is interpolated raw into a
+    # sed replacement (|, &, \ corrupt it), awk -v, and OTTL/YAML string literals (a "
+    # breaks the literal) downstream — one guard closes all three sinks. (#review)
+    case "$env" in
+        *[!A-Za-z0-9._-]*)
+            log_error "Invalid deployment environment '$env'. Use only letters, digits, '.', '_', '-'." ;;
+    esac
 
     log_info "Setting deployment.environment to: $env"
 
