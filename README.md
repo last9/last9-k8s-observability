@@ -165,9 +165,11 @@ whatever you provide becomes the value, applied to all signals:
 ```
 
 Flow:
-- Omit `env=` → no `deployment.environment` attribute is added.
 - `env=staging` → the collector adds `set(attributes["deployment.environment"], "staging")`
   and auto-instrumentation sets `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging`.
+- Omit `env=` on an **interactive terminal** → the script prompts for the environment
+  (leave blank to skip).
+- Omit `env=` **non-interactively** (curl \| bash one-liner, CI) → no prompt, attribute stays unset.
 
 ### Deploy with Tolerations
 

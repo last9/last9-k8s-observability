@@ -1187,6 +1187,23 @@ update_otel_endpoint() {
     fi
 }
 
+# Interactively ask for the deployment environment when run as a dev-tool CLI.
+# Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
+# stays unset there. An explicit env= argument always wins and suppresses the prompt.
+prompt_deployment_environment() {
+    [ "$UNINSTALL_MODE" = true ] && return 0
+    [ -n "$DEPLOYMENT_ENV" ] && return 0   # env= provided — honor it, don't prompt
+    [ -t 0 ] || return 0                   # non-interactive (piped/CI) — leave unset
+
+    printf "%b" "${GREEN}[INPUT]${NC} Deployment environment (e.g. production, staging) [blank to skip]: " >&2
+    read -r DEPLOYMENT_ENV || DEPLOYMENT_ENV=""
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        log_info "Using deployment.environment=$DEPLOYMENT_ENV"
+    else
+        log_info "No deployment environment entered — deployment.environment will be omitted"
+    fi
+}
+
 # Function to update deployment environment in configuration files
 update_deployment_environment() {
     local env="$1"
@@ -2257,7 +2274,10 @@ main() {
     
     # Check prerequisites
     check_prerequisites
-    
+
+    # Ask for deployment environment interactively when not passed via env=
+    prompt_deployment_environment
+
     if [ "$UNINSTALL_MODE" = true ] && [ -n "$FUNCTION_TO_EXECUTE" ]; then
         # Handle special uninstall functions
         case "$FUNCTION_TO_EXECUTE" in

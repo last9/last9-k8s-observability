@@ -144,6 +144,19 @@ if [ -z "$AUTH_TOKEN" ] || [ -z "$OTEL_ENDPOINT" ] || [ -z "$MONITORING_ENDPOINT
     exit 1
 fi
 
+# Ask for the deployment environment interactively when not passed via env=.
+# Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
+# stays unset there. An explicit env= argument always wins and suppresses the prompt.
+if [ -z "$DEPLOYMENT_ENV" ] && [ -t 0 ]; then
+    printf "%b" "${GREEN}[INPUT]${NC} Deployment environment (e.g. production, staging) [blank to skip]: " >&2
+    read -r DEPLOYMENT_ENV || DEPLOYMENT_ENV=""
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        log_info "Using deployment.environment=$DEPLOYMENT_ENV"
+    else
+        log_info "No deployment environment entered — deployment.environment will be omitted"
+    fi
+fi
+
 log_info "=========================================="
 log_info "Starting GKE Autopilot OpenTelemetry installation..."
 log_info "=========================================="

@@ -65,7 +65,8 @@ to all signals:
   env="staging"
 ```
 
-Omit `env=` and no `deployment.environment` attribute is added.
+Omit `env=` on an interactive terminal and the script prompts for the environment
+(leave blank to skip). Run non-interactively (curl | bash, CI) and it stays unset — no prompt.
 
 ### Uninstallation
 
