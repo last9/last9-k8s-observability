@@ -1013,7 +1013,7 @@ show_help() {
     echo "Advanced Options:"
     echo "  env=ENVIRONMENT          Override deployment.environment attribute (e.g., production, staging, dev)"
     echo "                           Updates both collector and auto-instrumentation configurations"
-    echo "                           Default: 'staging' for collector, 'local' for instrumentation"
+    echo "                           Default: unset — deployment.environment is omitted unless env= is provided"
     echo ""
     echo "  cluster=CLUSTER_NAME     Set cluster.name attribute for telemetry data"
     echo "                           If not provided, automatically detected from kubectl current-context"
@@ -1420,16 +1420,18 @@ update_deployment_environment() {
     log_info "Setting deployment.environment to: $env"
 
     # Update collector values file (last9-otel-collector-values.yaml)
+    # The attribute is a placeholder comment by default (unset); activate it with the value.
     if [ -f "last9-otel-collector-values.yaml" ]; then
-        log_info "Updating deployment.environment in collector values file..."
+        log_info "Activating deployment.environment in collector values file..."
 
-        # Replace deployment.environment value in the set(attributes[...]) line
-        sed -i.tmp "s/deployment\.environment\"], \"[^\"]*\"/deployment.environment\"], \"$env\"/" last9-otel-collector-values.yaml
+        # Replace the @DEPLOYMENT_ENVIRONMENT@ placeholder comment with an active OTTL set
+        # statement, preserving the original indentation.
+        sed -i.tmp "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"$env\")|" last9-otel-collector-values.yaml
         rm -f last9-otel-collector-values.yaml.tmp
 
         # Verify the change
         if grep -q "deployment.environment\"], \"$env\"" last9-otel-collector-values.yaml; then
-            log_info "✓ Updated deployment.environment=$env in collector values file"
+            log_info "✓ Set deployment.environment=$env in collector values file"
         else
             log_warn "⚠ Could not verify deployment.environment update in collector values file"
         fi
@@ -1438,16 +1440,24 @@ update_deployment_environment() {
     fi
 
     # Update instrumentation file (instrumentation.yaml)
+    # OTEL_RESOURCE_ATTRIBUTES is empty by default (unset); populate it with the value.
     if [ -f "instrumentation.yaml" ]; then
-        log_info "Updating deployment.environment in instrumentation file..."
+        log_info "Setting deployment.environment in instrumentation file..."
 
-        # Replace deployment.environment=<value> in all occurrences
-        sed -i.tmp "s/deployment\.environment=[^ \"]*/deployment.environment=$env/g" instrumentation.yaml
-        rm -f instrumentation.yaml.tmp
+        # Fill in the value on the line following each OTEL_RESOURCE_ATTRIBUTES env entry,
+        # preserving its indentation (handles both quoted and unquoted styles).
+        awk -v env="$env" '
+            prev ~ /OTEL_RESOURCE_ATTRIBUTES/ && /value:/ {
+                match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+                print indent "value: \"deployment.environment=" env "\""
+                prev = $0; next
+            }
+            { prev = $0; print }
+        ' instrumentation.yaml > instrumentation.yaml.tmp && mv instrumentation.yaml.tmp instrumentation.yaml
 
         # Verify the change
         if grep -q "deployment.environment=$env" instrumentation.yaml; then
-            log_info "✓ Updated deployment.environment=$env in instrumentation file"
+            log_info "✓ Set deployment.environment=$env in instrumentation file"
         else
             log_warn "⚠ Could not verify deployment.environment update in instrumentation file"
         fi

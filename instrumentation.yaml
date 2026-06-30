@@ -31,7 +31,7 @@ spec:
         - name: OTEL_LOGS_EXPORTER
           value: "none"
         - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "deployment.environment=local"
+          value: ""
   nodejs:
     env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -53,7 +53,7 @@ spec:
         - name: OTEL_LOGS_EXPORTER
           value: "none"
         - name: OTEL_RESOURCE_ATTRIBUTES
-          value: "deployment.environment=local"
+          value: ""
   python:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -73,6 +73,6 @@ spec:
       - name: OTEL_LOGS_EXPORTER
         value: none
       - name: OTEL_RESOURCE_ATTRIBUTES
-        value: deployment.environment=local
+        value: ""
       - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
         value: system-metrics

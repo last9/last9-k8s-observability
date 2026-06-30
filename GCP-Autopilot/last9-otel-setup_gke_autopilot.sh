@@ -44,11 +44,15 @@ MONITORING_ENDPOINT=""
 LAST9_USERNAME=""
 LAST9_PASSWORD=""
 UNINSTALL_MODE=false
+DEPLOYMENT_ENV=""
 
 for arg in "$@"; do
     case $arg in
         uninstall-all)
             UNINSTALL_MODE=true
+            ;;
+        env=*)
+            DEPLOYMENT_ENV="${arg#*=}"
             ;;
         endpoint=*)
             OTEL_ENDPOINT="${arg#*=}"
@@ -135,7 +139,8 @@ fi
 # Validate required parameters
 if [ -z "$AUTH_TOKEN" ] || [ -z "$OTEL_ENDPOINT" ] || [ -z "$MONITORING_ENDPOINT" ] || [ -z "$LAST9_USERNAME" ] || [ -z "$LAST9_PASSWORD" ]; then
     log_error "All parameters are required"
-    log_error "Usage: $0 endpoint=\"<endpoint>\" token=\"<token>\" monitoring-endpoint=\"<monitoring-endpoint>\" username=\"<username>\" password=\"<password>\""
+    log_error "Usage: $0 endpoint=\"<endpoint>\" token=\"<token>\" monitoring-endpoint=\"<monitoring-endpoint>\" username=\"<username>\" password=\"<password>\" [env=<environment>]"
+    log_error "  env=<environment>  Optional. Sets deployment.environment attribute. Default: unset (attribute omitted)"
     exit 1
 fi
 
@@ -167,6 +172,12 @@ replace_placeholders() {
     sed -i.bak "s|{{OTEL_ENDPOINT}}|${ESCAPED_ENDPOINT}|g" "$temp_file"
     sed -i.bak "s|{{MONITORING_ENDPOINT}}|${ESCAPED_MONITORING}|g" "$temp_file"
     sed -i.bak "s|{{CLUSTER_NAME}}|${ESCAPED_CLUSTER}|g" "$temp_file"
+
+    # deployment.environment is unset by default (placeholder comment). Activate it only
+    # when env=<environment> was provided, preserving indentation.
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        sed -i.bak "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"${DEPLOYMENT_ENV}\")|" "$temp_file"
+    fi
 
     # Remove backup files
     rm -f "${temp_file}.bak"
@@ -272,11 +283,26 @@ log_info "✓ Collector service created"
 echo ""
 
 # Create Instrumentation (with retry logic)
-log_info "Creating OpenTelemetry Instrumentation..."
+# deployment.environment is unset by default; fill OTEL_RESOURCE_ATTRIBUTES only when env= was provided.
+INSTRUMENTATION_FILE="$SCRIPT_DIR/instrumentation.yaml.tmp"
+cp "$SCRIPT_DIR/instrumentation.yaml" "$INSTRUMENTATION_FILE"
+if [ -n "$DEPLOYMENT_ENV" ]; then
+    log_info "Creating OpenTelemetry Instrumentation (deployment.environment=$DEPLOYMENT_ENV)..."
+    awk -v env="$DEPLOYMENT_ENV" '
+        prev ~ /OTEL_RESOURCE_ATTRIBUTES/ && /value:/ {
+            match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+            print indent "value: \"deployment.environment=" env "\""
+            prev = $0; next
+        }
+        { prev = $0; print }
+    ' "$INSTRUMENTATION_FILE" > "${INSTRUMENTATION_FILE}.awk" && mv "${INSTRUMENTATION_FILE}.awk" "$INSTRUMENTATION_FILE"
+else
+    log_info "Creating OpenTelemetry Instrumentation (deployment.environment unset)..."
+fi
 MAX_RETRIES=5
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if kubectl apply -f "$SCRIPT_DIR/instrumentation.yaml" -n $NAMESPACE ; then
+    if kubectl apply -f "$INSTRUMENTATION_FILE" -n $NAMESPACE ; then
         log_info "✓ Instrumentation created"
         break
     else
@@ -286,7 +312,7 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             sleep 10
         else
             log_error "Failed to create instrumentation after $MAX_RETRIES attempts"
-            log_warn "You can manually apply it later: kubectl apply -f $SCRIPT_DIR/instrumentation.yaml -n $NAMESPACE"
+            log_warn "You can manually apply it later: kubectl apply -f $INSTRUMENTATION_FILE -n $NAMESPACE"
         fi
     fi
 done

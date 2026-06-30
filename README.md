@@ -153,6 +153,10 @@ If not provided, the cluster name is auto-detected from `kubectl config current-
 
 ### Set Deployment Environment
 
+`deployment.environment` is **unset by default** — the attribute is omitted entirely
+from both the collector and auto-instrumentation. Pass `env=<environment>` to set it;
+whatever you provide becomes the value, applied to all signals:
+
 ```bash
 ./last9-otel-setup.sh \
   token="..." \
@@ -160,7 +164,10 @@ If not provided, the cluster name is auto-detected from `kubectl config current-
   env="production"
 ```
 
-Default: `staging` for collector, `local` for auto-instrumentation.
+Flow:
+- Omit `env=` → no `deployment.environment` attribute is added.
+- `env=staging` → the collector adds `set(attributes["deployment.environment"], "staging")`
+  and auto-instrumentation sets `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging`.
 
 ### Deploy with Tolerations
 
