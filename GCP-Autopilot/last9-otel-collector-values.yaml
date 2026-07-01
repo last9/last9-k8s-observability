@@ -167,6 +167,20 @@ config:
       limit_percentage: 85
       # By default spike_limit_mib is set to 15% of ".Values.resources.limits.memory"
       spike_limit_percentage: 15
+    transform/metrics/last9:
+      error_mode: ignore
+      metric_statements:
+        - context: resource
+          statements:
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
+            - set(attributes["cluster.name"], "{{CLUSTER_NAME}}")
+    transform/traces/last9:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
+            - set(attributes["cluster.name"], "{{CLUSTER_NAME}}")
   receivers:
     otlp:
       protocols:
@@ -211,6 +225,7 @@ config:
           - otlp
           - prometheus
         processors:
+          - transform/metrics/last9
           - batch
         exporters:
           - otlp/last9
@@ -218,7 +233,8 @@ config:
         receivers:
           - otlp
         processors:
-          - batch          
+          - transform/traces/last9
+          - batch
         exporters:
           - otlp/last9
  
