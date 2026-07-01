@@ -184,6 +184,7 @@ config:
       metric_statements:
         - context: resource
           statements:
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
             - delete_key(attributes, "telemetry.sdk.name")
             - delete_key(attributes, "telemetry.sdk.language")
             - delete_key(attributes, "telemetry.sdk.version")
@@ -205,6 +206,13 @@ config:
             - delete_matching_keys(attributes, "\\.?istio\\.io/.*")
             - delete_matching_keys(attributes, "^prometheus\\.io/.*")
             - delete_key(attributes, "pod-template-hash")
+    transform/traces/last9:
+      error_mode: ignore
+      trace_statements:
+        - context: resource
+          statements:
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
+            - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == ""
   receivers:
     otlp:
       protocols:
@@ -257,7 +265,8 @@ config:
         receivers:
           - otlp
         processors:
-          - batch          
+          - transform/traces/last9
+          - batch
         exporters:
           - otlp/last9
  
