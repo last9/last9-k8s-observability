@@ -119,8 +119,11 @@ prometheus:
             key: password
         writeRelabelConfigs:
           - sourceLabels: [__name__]
-            regex: "up|kube_.*|container_.*|node_.*|kubelet_volume_stats_.*|namedprocess_.*"  # `up` carries EC2 host metadata (job=ec2-metadata) + process-exporter
+            regex: "up|container_.*|kubelet_volume_stats_.*|namedprocess_.*|node_boot_time_seconds|node_context_switches_total|node_cpu_seconds_total|node_disk_io_time_seconds_total|node_disk_read_bytes_total|node_disk_read_time_seconds_total|node_disk_reads_completed_total|node_disk_write_time_seconds_total|node_disk_writes_completed_total|node_disk_written_bytes_total|node_filefd_allocated|node_filesystem_free_bytes|node_filesystem_size_bytes|node_load1|node_load5|node_load15|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_netstat_Tcp_CurrEstab|node_netstat_Tcp_InSegs|node_netstat_Tcp_OutSegs|node_netstat_Tcp_RetransSegs|node_network_receive_bytes_total|node_network_transmit_bytes_total|node_sockstat_sockets_used|node_sockstat_TCP_alloc|node_sockstat_TCP_tw|node_sockstat_UDP_inuse|node_uname_info|kube_deployment_spec_replicas|kube_deployment_status_replicas_ready|kube_deployment_status_replicas_updated|kube_pod_container_info|kube_pod_container_resource_limits|kube_pod_container_resource_limits_memory_bytes|kube_pod_container_resource_requests|kube_pod_container_resource_requests_memory_bytes|kube_pod_container_status_last_terminated_reason|kube_pod_container_status_restarts_total|kube_pod_container_status_running|kube_pod_container_status_terminated|kube_pod_container_status_terminated_reason|kube_pod_container_status_waiting_reason|kube_pod_created|kube_pod_info|kube_pod_owner|kube_pod_status_phase|kube_state_metrics_total_shards|kube_statefulset_created|kube_statefulset_info|kube_statefulset_replicas|kube_statefulset_spec_replicas|kube_statefulset_status_replicas_available|kube_statefulset_status_replicas_ready|kube_statefulset_status_replicas_unavailable|kube_statefulset_status_replicas_updated"
             action: keep
+          - sourceLabels: [__name__]
+            regex: "container_(memory_failures_total|blkio_device_usage_total|last_seen|memory_failcnt|sockets|memory_kernel_usage|memory_cache)"
+            action: drop
 
 # Keep kube-state-metrics
 kubeStateMetrics:
