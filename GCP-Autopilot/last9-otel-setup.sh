@@ -935,7 +935,7 @@ show_help() {
     echo "Advanced Options:"
     echo "  env=ENVIRONMENT          Override deployment.environment attribute (e.g., production, staging, dev)"
     echo "                           Updates both collector and auto-instrumentation configurations"
-    echo "                           Default: 'staging' for collector, 'local' for instrumentation"
+    echo "                           Default: unset — deployment.environment is omitted unless env= is provided"
     echo ""
     echo "  cluster=CLUSTER_NAME     Set cluster.name attribute for telemetry data"
     echo "                           If not provided, automatically detected from kubectl current-context"
@@ -1187,28 +1187,58 @@ update_otel_endpoint() {
     fi
 }
 
+# Interactively ask for the deployment environment when run as a dev-tool CLI.
+# Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
+# stays unset there. An explicit env= argument always wins and suppresses the prompt.
+prompt_deployment_environment() {
+    [ "$UNINSTALL_MODE" = true ] && return 0
+    [ -n "$DEPLOYMENT_ENV" ] && return 0   # env= provided — honor it, don't prompt
+    [ -t 0 ] || return 0                   # non-interactive (piped/CI) — leave unset
+
+    printf "%b" "${GREEN}[INPUT]${NC} Deployment environment (e.g. production, staging) [blank to skip]: " >&2
+    read -r DEPLOYMENT_ENV || DEPLOYMENT_ENV=""
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        log_info "Using deployment.environment=$DEPLOYMENT_ENV"
+    else
+        log_info "No deployment environment entered — deployment.environment will be omitted"
+    fi
+}
+
 # Function to update deployment environment in configuration files
 update_deployment_environment() {
     local env="$1"
 
+    # Trim surrounding whitespace; a whitespace-only value is treated as unset.
+    env="$(printf '%s' "$env" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
     if [ -z "$env" ]; then
-        log_info "No deployment environment specified, using default values"
+        log_info "No deployment environment specified — deployment.environment will be omitted"
         return 0
     fi
+
+    # Reject values outside a safe identifier charset. env is interpolated raw into a
+    # sed replacement (|, &, \ corrupt it), awk -v, and OTTL/YAML string literals (a "
+    # breaks the literal) downstream — one guard closes all three sinks. (#review)
+    case "$env" in
+        *[!A-Za-z0-9._-]*)
+            log_error "Invalid deployment environment '$env'. Use only letters, digits, '.', '_', '-'." ;;
+    esac
 
     log_info "Setting deployment.environment to: $env"
 
     # Update collector values file (last9-otel-collector-values.yaml)
+    # The attribute is a placeholder comment by default (unset); activate it with the value.
     if [ -f "last9-otel-collector-values.yaml" ]; then
-        log_info "Updating deployment.environment in collector values file..."
+        log_info "Activating deployment.environment in collector values file..."
 
-        # Replace deployment.environment value in the set(attributes[...]) line
-        sed -i.tmp "s/deployment\.environment\"], \"[^\"]*\"/deployment.environment\"], \"$env\"/" last9-otel-collector-values.yaml
+        # Replace the @DEPLOYMENT_ENVIRONMENT@ placeholder comment with an active OTTL set
+        # statement, preserving the original indentation.
+        sed -i.tmp "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"$env\")|" last9-otel-collector-values.yaml
         rm -f last9-otel-collector-values.yaml.tmp
 
         # Verify the change
         if grep -q "deployment.environment\"], \"$env\"" last9-otel-collector-values.yaml; then
-            log_info "✓ Updated deployment.environment=$env in collector values file"
+            log_info "✓ Set deployment.environment=$env in collector values file"
         else
             log_warn "⚠ Could not verify deployment.environment update in collector values file"
         fi
@@ -1217,16 +1247,24 @@ update_deployment_environment() {
     fi
 
     # Update instrumentation file (instrumentation.yaml)
+    # OTEL_RESOURCE_ATTRIBUTES is empty by default (unset); populate it with the value.
     if [ -f "instrumentation.yaml" ]; then
-        log_info "Updating deployment.environment in instrumentation file..."
+        log_info "Setting deployment.environment in instrumentation file..."
 
-        # Replace deployment.environment=<value> in all occurrences
-        sed -i.tmp "s/deployment\.environment=[^ \"]*/deployment.environment=$env/g" instrumentation.yaml
-        rm -f instrumentation.yaml.tmp
+        # Fill in the value on the line following each OTEL_RESOURCE_ATTRIBUTES env entry,
+        # preserving its indentation (handles both quoted and unquoted styles).
+        awk -v env="$env" '
+            prev ~ /OTEL_RESOURCE_ATTRIBUTES/ && /value:/ {
+                match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+                print indent "value: \"deployment.environment=" env "\""
+                prev = $0; next
+            }
+            { prev = $0; print }
+        ' instrumentation.yaml > instrumentation.yaml.tmp && mv instrumentation.yaml.tmp instrumentation.yaml
 
         # Verify the change
         if grep -q "deployment.environment=$env" instrumentation.yaml; then
-            log_info "✓ Updated deployment.environment=$env in instrumentation file"
+            log_info "✓ Set deployment.environment=$env in instrumentation file"
         else
             log_warn "⚠ Could not verify deployment.environment update in instrumentation file"
         fi
@@ -2247,7 +2285,10 @@ main() {
     
     # Check prerequisites
     check_prerequisites
-    
+
+    # Ask for deployment environment interactively when not passed via env=
+    prompt_deployment_environment
+
     if [ "$UNINSTALL_MODE" = true ] && [ -n "$FUNCTION_TO_EXECUTE" ]; then
         # Handle special uninstall functions
         case "$FUNCTION_TO_EXECUTE" in

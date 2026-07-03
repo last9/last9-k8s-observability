@@ -44,11 +44,15 @@ MONITORING_ENDPOINT=""
 LAST9_USERNAME=""
 LAST9_PASSWORD=""
 UNINSTALL_MODE=false
+DEPLOYMENT_ENV=""
 
 for arg in "$@"; do
     case $arg in
         uninstall-all)
             UNINSTALL_MODE=true
+            ;;
+        env=*)
+            DEPLOYMENT_ENV="${arg#*=}"
             ;;
         endpoint=*)
             OTEL_ENDPOINT="${arg#*=}"
@@ -135,9 +139,34 @@ fi
 # Validate required parameters
 if [ -z "$AUTH_TOKEN" ] || [ -z "$OTEL_ENDPOINT" ] || [ -z "$MONITORING_ENDPOINT" ] || [ -z "$LAST9_USERNAME" ] || [ -z "$LAST9_PASSWORD" ]; then
     log_error "All parameters are required"
-    log_error "Usage: $0 endpoint=\"<endpoint>\" token=\"<token>\" monitoring-endpoint=\"<monitoring-endpoint>\" username=\"<username>\" password=\"<password>\""
+    log_error "Usage: $0 endpoint=\"<endpoint>\" token=\"<token>\" monitoring-endpoint=\"<monitoring-endpoint>\" username=\"<username>\" password=\"<password>\" [env=<environment>]"
+    log_error "  env=<environment>  Optional. Sets deployment.environment attribute. Default: unset (attribute omitted)"
     exit 1
 fi
+
+# Ask for the deployment environment interactively when not passed via env=.
+# Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
+# stays unset there. An explicit env= argument always wins and suppresses the prompt.
+if [ -z "$DEPLOYMENT_ENV" ] && [ -t 0 ]; then
+    printf "%b" "${GREEN}[INPUT]${NC} Deployment environment (e.g. production, staging) [blank to skip]: " >&2
+    read -r DEPLOYMENT_ENV || DEPLOYMENT_ENV=""
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        log_info "Using deployment.environment=$DEPLOYMENT_ENV"
+    else
+        log_info "No deployment environment entered — deployment.environment will be omitted"
+    fi
+fi
+
+# Trim surrounding whitespace, then reject values outside a safe identifier charset.
+# DEPLOYMENT_ENV is interpolated raw into a sed replacement (|, &, \ corrupt it), awk -v,
+# and OTTL string literals (a " breaks the literal) below — one guard closes all sinks.
+# (log_error here does not exit, so exit explicitly.) (#review)
+DEPLOYMENT_ENV="$(printf '%s' "$DEPLOYMENT_ENV" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+case "$DEPLOYMENT_ENV" in
+    *[!A-Za-z0-9._-]*)
+        log_error "Invalid deployment environment '$DEPLOYMENT_ENV'. Use only letters, digits, '.', '_', '-'."
+        exit 1 ;;
+esac
 
 log_info "=========================================="
 log_info "Starting GKE Autopilot OpenTelemetry installation..."
@@ -167,6 +196,12 @@ replace_placeholders() {
     sed -i.bak "s|{{OTEL_ENDPOINT}}|${ESCAPED_ENDPOINT}|g" "$temp_file"
     sed -i.bak "s|{{MONITORING_ENDPOINT}}|${ESCAPED_MONITORING}|g" "$temp_file"
     sed -i.bak "s|{{CLUSTER_NAME}}|${ESCAPED_CLUSTER}|g" "$temp_file"
+
+    # deployment.environment is unset by default (placeholder comment). Activate it only
+    # when env=<environment> was provided, preserving indentation.
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        sed -i.bak "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"${DEPLOYMENT_ENV}\")|" "$temp_file"
+    fi
 
     # Remove backup files
     rm -f "${temp_file}.bak"
@@ -272,11 +307,26 @@ log_info "✓ Collector service created"
 echo ""
 
 # Create Instrumentation (with retry logic)
-log_info "Creating OpenTelemetry Instrumentation..."
+# deployment.environment is unset by default; fill OTEL_RESOURCE_ATTRIBUTES only when env= was provided.
+INSTRUMENTATION_FILE="$SCRIPT_DIR/instrumentation.yaml.tmp"
+cp "$SCRIPT_DIR/instrumentation.yaml" "$INSTRUMENTATION_FILE"
+if [ -n "$DEPLOYMENT_ENV" ]; then
+    log_info "Creating OpenTelemetry Instrumentation (deployment.environment=$DEPLOYMENT_ENV)..."
+    awk -v env="$DEPLOYMENT_ENV" '
+        prev ~ /OTEL_RESOURCE_ATTRIBUTES/ && /value:/ {
+            match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+            print indent "value: \"deployment.environment=" env "\""
+            prev = $0; next
+        }
+        { prev = $0; print }
+    ' "$INSTRUMENTATION_FILE" > "${INSTRUMENTATION_FILE}.awk.tmp" && mv "${INSTRUMENTATION_FILE}.awk.tmp" "$INSTRUMENTATION_FILE"
+else
+    log_info "Creating OpenTelemetry Instrumentation (deployment.environment unset)..."
+fi
 MAX_RETRIES=5
 RETRY_COUNT=0
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if kubectl apply -f "$SCRIPT_DIR/instrumentation.yaml" -n $NAMESPACE ; then
+    if kubectl apply -f "$INSTRUMENTATION_FILE" -n $NAMESPACE ; then
         log_info "✓ Instrumentation created"
         break
     else
@@ -286,6 +336,8 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             sleep 10
         else
             log_error "Failed to create instrumentation after $MAX_RETRIES attempts"
+            # $INSTRUMENTATION_FILE is a *.tmp removed by the EXIT trap — point at the source
+            # file (re-run with env=<environment> to re-apply deployment.environment). (#review)
             log_warn "You can manually apply it later: kubectl apply -f $SCRIPT_DIR/instrumentation.yaml -n $NAMESPACE"
         fi
     fi

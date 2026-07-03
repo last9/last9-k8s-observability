@@ -52,6 +52,22 @@ cd GCP-Autopilot
   password="your-password"
 ```
 
+### Set Deployment Environment (optional)
+
+`deployment.environment` is **unset by default** — omitted from both the collector and
+auto-instrumentation. Pass `env=<environment>` to set it; the value you provide is applied
+to all signals:
+
+```bash
+./last9-otel-setup_gke_autopilot.sh \
+  endpoint="..." token="..." monitoring-endpoint="..." \
+  username="..." password="..." \
+  env="staging"
+```
+
+Omit `env=` on an interactive terminal and the script prompts for the environment
+(leave blank to skip). Run non-interactively (curl | bash, CI) and it stays unset — no prompt.
+
 ### Uninstallation
 
 ```bash
