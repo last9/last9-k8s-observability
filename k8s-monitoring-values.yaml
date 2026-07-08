@@ -22,6 +22,8 @@ prometheus:
     # Enable only necessary scrape configs
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
+    scrapeInterval: 60s
+    evaluationInterval: 60s
     
     # Configure remote write
     # Global external labels to add to all metrics
@@ -140,6 +142,7 @@ prometheus-node-exporter:
 kubelet:
   enabled: true
   serviceMonitor:
+    interval: 60s
     resource: true  # Enables scraping of cadvisor metrics
     cAdvisor: true
 
