@@ -200,6 +200,10 @@ config:
           statements:
             # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
             - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == ""
+        - context: span
+          statements:
+            - truncate_all(attributes, 400)
+            - truncate_all(resource.attributes, 1000)
   receivers:
     otlp:
       protocols:
@@ -756,6 +760,5 @@ networkPolicy:
 
 # Allow containers to share processes across pod namespace
 shareProcessNamespace: false
-
 
 
