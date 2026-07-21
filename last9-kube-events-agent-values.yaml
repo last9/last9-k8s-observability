@@ -155,7 +155,7 @@ config:
             # Additional resource attributes can be set as follows.
             # Use additional resource attributes to differentiate between clusters and deployments.
             # set(resource.attributes["<key>"], value)
-            - set(resource.attributes["deployment.environment"], "staging")
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
 
             # Set timestamp from event creation time
             - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ"))) where time_unix_nano == 0

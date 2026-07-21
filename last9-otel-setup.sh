@@ -1493,6 +1493,26 @@ update_deployment_environment() {
         log_warn "⚠ instrumentation.yaml not found, skipping instrumentation environment update"
     fi
 
+    # Update kube-events agent values file (last9-kube-events-agent-values.yaml)
+    # The attribute is a placeholder comment by default (unset); activate it with the value.
+    if [ -f "last9-kube-events-agent-values.yaml" ]; then
+        log_info "Activating deployment.environment in kube-events agent values file..."
+
+        # Replace the @DEPLOYMENT_ENVIRONMENT@ placeholder comment with an active OTTL set
+        # statement, preserving the original indentation.
+        sed -i.tmp "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(resource.attributes[\"deployment.environment\"], \"$env\")|" last9-kube-events-agent-values.yaml
+        rm -f last9-kube-events-agent-values.yaml.tmp
+
+        # Verify the change
+        if grep -q "deployment.environment\"], \"$env\"" last9-kube-events-agent-values.yaml; then
+            log_info "✓ Set deployment.environment=$env in kube-events agent values file"
+        else
+            log_warn "⚠ Could not verify deployment.environment update in kube-events agent values file"
+        fi
+    else
+        log_warn "⚠ last9-kube-events-agent-values.yaml not found, skipping kube-events agent environment update"
+    fi
+
     log_info "✓ Deployment environment configuration completed"
 }
 
@@ -2615,7 +2635,7 @@ uninstall_opentelemetry() {
     # Remove instrumentation from instrumentation.yaml
     # Try to identify the instrumentation by common names or labels
     log_info "Removing instrumentation resources..."
-    kubectl delete instrumentations --all -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || log_info "No instrumentation resources found"
+    kubectl delete instrumentation l9-instrumentation -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || log_info "No instrumentation resource found"
     
     # Remove service from collector-svc.yaml
     # Common service names that might be in collector-svc.yaml
