@@ -31,7 +31,7 @@ set -e  # Exit on any error
 # Configuration defaults
 NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
-COLLECTOR_VERSION="0.126.0"
+COLLECTOR_VERSION="0.165.0"
 MONITORING_VERSION="75.15.1"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
@@ -2472,7 +2472,7 @@ install_events_agent() {
     # Install/upgrade the events agent
     log_info "Installing/upgrading Last9 Kubernetes Events Agent..."
     if ! helm upgrade --install last9-kube-events-agent open-telemetry/opentelemetry-collector \
-        --version 0.125.0 \
+        --version 0.165.0 \
         -n "$NAMESPACE" \
         --create-namespace \
         -f last9-kube-events-agent-values.yaml \

@@ -303,7 +303,7 @@ COLLECTOR_VALUES=$(replace_placeholders "$SCRIPT_DIR/last9-otel-collector-values
 helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
   --namespace $NAMESPACE \
   --values "$COLLECTOR_VALUES" \
-  --version 0.126.0 \
+  --version 0.165.0 \
   --wait \
   --timeout 5m
 
