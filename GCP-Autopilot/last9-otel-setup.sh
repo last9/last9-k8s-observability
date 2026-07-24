@@ -81,6 +81,33 @@ escape_for_sed() {
     printf '%s\n' "$1" | sed 's:[[\.*^$()+?{|/]:\\&:g'
 }
 
+# Activate or update deployment.environment in an OTTL values YAML file.
+# Replaces @DEPLOYMENT_ENVIRONMENT@ placeholders and updates existing OTTL set
+# lines so re-running with a different env= is idempotent.
+# $1 = file path, $2 = env value, $3 = "attributes" or "resource.attributes"
+activate_deployment_environment_in_values() {
+    local file="$1" env="$2" scope="$3"
+    local escaped_env ottl_target
+    escaped_env=$(escape_for_sed "$env")
+    case "$scope" in
+        attributes)
+            ottl_target='attributes\["deployment.environment"\]'
+            ;;
+        resource.attributes)
+            ottl_target='resource\.attributes\["deployment.environment"\]'
+            ;;
+        *)
+            log_error "Invalid OTTL scope for deployment.environment: $scope"
+            ;;
+    esac
+
+    sed -i.tmp \
+        -e "s|^\([[:space:]]*\)- set(${ottl_target}, \"[^\"]*\")|\1- set(${ottl_target}, \"${escaped_env}\")|" \
+        -e "s|^\([[:space:]]*\)# @DEPLOYMENT_ENVIRONMENT@.*|\1- set(${ottl_target}, \"${escaped_env}\")|" \
+        "$file"
+    rm -f "${file}.tmp"
+}
+
 # Check if yq is available
 check_yq_available() {
     if command -v yq >/dev/null 2>&1; then
@@ -1231,10 +1258,7 @@ update_deployment_environment() {
     if [ -f "last9-otel-collector-values.yaml" ]; then
         log_info "Activating deployment.environment in collector values file..."
 
-        # Replace the @DEPLOYMENT_ENVIRONMENT@ placeholder comment with an active OTTL set
-        # statement, preserving the original indentation.
-        sed -i.tmp "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"$env\")|" last9-otel-collector-values.yaml
-        rm -f last9-otel-collector-values.yaml.tmp
+        activate_deployment_environment_in_values "last9-otel-collector-values.yaml" "$env" attributes
 
         # Verify the change
         if grep -q "deployment.environment\"], \"$env\"" last9-otel-collector-values.yaml; then
@@ -1270,6 +1294,23 @@ update_deployment_environment() {
         fi
     else
         log_warn "⚠ instrumentation.yaml not found, skipping instrumentation environment update"
+    fi
+
+    # Update kube-events agent values file (last9-kube-events-agent-values.yaml)
+    # The attribute is a placeholder comment by default (unset); activate it with the value.
+    if [ -f "last9-kube-events-agent-values.yaml" ]; then
+        log_info "Activating deployment.environment in kube-events agent values file..."
+
+        activate_deployment_environment_in_values "last9-kube-events-agent-values.yaml" "$env" resource.attributes
+
+        # Verify the change
+        if grep -q "deployment.environment\"], \"$env\"" last9-kube-events-agent-values.yaml; then
+            log_info "✓ Set deployment.environment=$env in kube-events agent values file"
+        else
+            log_warn "⚠ Could not verify deployment.environment update in kube-events agent values file"
+        fi
+    else
+        log_warn "⚠ last9-kube-events-agent-values.yaml not found, skipping kube-events agent environment update"
     fi
 
     log_info "✓ Deployment environment configuration completed"
@@ -2104,7 +2145,7 @@ uninstall_opentelemetry() {
     # Remove instrumentation from instrumentation.yaml
     # Try to identify the instrumentation by common names or labels
     log_info "Removing instrumentation resources..."
-    kubectl delete instrumentations --all -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || log_info "No instrumentation resources found"
+    kubectl delete instrumentation l9-instrumentation -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || log_info "No instrumentation resource found"
     
     # Remove service from collector-svc.yaml
     # Common service names that might be in collector-svc.yaml

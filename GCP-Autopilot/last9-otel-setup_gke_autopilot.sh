@@ -197,10 +197,20 @@ replace_placeholders() {
     sed -i.bak "s|{{MONITORING_ENDPOINT}}|${ESCAPED_MONITORING}|g" "$temp_file"
     sed -i.bak "s|{{CLUSTER_NAME}}|${ESCAPED_CLUSTER}|g" "$temp_file"
 
-    # deployment.environment is unset by default (placeholder comment). Activate it only
-    # when env=<environment> was provided, preserving indentation.
+    # deployment.environment is unset by default (placeholder comment). Activate or
+    # update it only when env=<environment> was provided, preserving indentation.
     if [ -n "$DEPLOYMENT_ENV" ]; then
-        sed -i.bak "s|^\\( *\\)# @DEPLOYMENT_ENVIRONMENT@.*|\\1- set(attributes[\"deployment.environment\"], \"${DEPLOYMENT_ENV}\")|" "$temp_file"
+        local escaped_env ottl_target
+        escaped_env=$(printf '%s\n' "$DEPLOYMENT_ENV" | sed 's:[\/&]:\\&:g')
+        if [[ "$file" == *kube-events* ]]; then
+            ottl_target='resource\.attributes\["deployment.environment"\]'
+        else
+            ottl_target='attributes\["deployment.environment"\]'
+        fi
+        sed -i.bak \
+            -e "s|^\([[:space:]]*\)- set(${ottl_target}, \"[^\"]*\")|\1- set(${ottl_target}, \"${escaped_env}\")|" \
+            -e "s|^\([[:space:]]*\)# @DEPLOYMENT_ENVIRONMENT@.*|\1- set(${ottl_target}, \"${escaped_env}\")|" \
+            "$temp_file"
     fi
 
     # Remove backup files

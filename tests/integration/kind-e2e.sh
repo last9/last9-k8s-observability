@@ -159,8 +159,13 @@ test_monitoring_only() {
 
 test_events_only() {
     create_cluster "${CLUSTER_PREFIX}-events"
-    run_setup events-only token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP"
+    run_setup events-only token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP" env=production
     assert_pods_ready "app.kubernetes.io/name=last9-kube-events-agent"
+    local cm
+    cm=$(kubectl get configmap -n "$NAMESPACE" -l app.kubernetes.io/instance=last9-kube-events-agent -o name 2>/dev/null | head -1)
+    [ -n "$cm" ] || fail "events agent configmap not found"
+    kubectl get "$cm" -n "$NAMESPACE" -o yaml | grep -q 'deployment.environment.*production' \
+        || fail "events agent config missing deployment.environment=production"
     info "✓ events-only passed"
 }
 
