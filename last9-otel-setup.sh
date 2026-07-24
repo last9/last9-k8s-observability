@@ -1686,13 +1686,14 @@ setup_helm_repos() {
             log_info "Helm repositories updated!"
             return 0
         fi
-        log_warn "Helm repo add/update failed (attempt $attempt/3), retrying..."
-        sleep 5
+        if [ "$attempt" -lt 3 ]; then
+            log_warn "Helm repo add/update failed (attempt $attempt/3), retrying..."
+            sleep 5
+        fi
     done
 
     log_error "Failed to add/update Helm repositories (open-telemetry, prometheus-community) after 3 attempts."
     log_error "Check network connectivity to open-telemetry.github.io and prometheus-community.github.io."
-    exit 1
 }
 
 # Adopt pre-existing OTel CRDs into this Helm release so that

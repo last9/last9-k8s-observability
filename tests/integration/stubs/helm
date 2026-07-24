@@ -3,9 +3,10 @@
 # Logs every invocation to $HELM_CALLS_LOG and simulates responses.
 #
 # Env flags:
-#   HELM_CALLS_LOG          file to append each call to (full arg string)
-#   SIMULATE_HELM_FAILURE   "1" → `helm upgrade --install` exits non-zero
-#   MOCK_HELM_VERSION       version string for `helm version --short` (default v3.14.0)
+#   HELM_CALLS_LOG              file to append each call to (full arg string)
+#   SIMULATE_HELM_FAILURE       "1" → `helm upgrade --install` exits non-zero
+#   SIMULATE_HELM_REPO_FAILURE  "1" → `helm repo add|update` exits non-zero
+#   MOCK_HELM_VERSION           version string for `helm version --short` (default v3.14.0)
 
 [ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
 
@@ -22,6 +23,10 @@ case "$cmd" in
         exit 0
         ;;
     "repo "*)
+        if [ "$SIMULATE_HELM_REPO_FAILURE" = "1" ]; then
+            echo "Error: simulated helm repo failure" >&2
+            exit 1
+        fi
         exit 0
         ;;
     "show crds "*)
