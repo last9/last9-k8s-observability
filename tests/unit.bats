@@ -426,7 +426,7 @@ monitoring_tls_func() {
     awk '/^inject_monitoring_tls_server_name\(\)/,/^}/' "$SCRIPT"
 }
 
-@test "inject_collector_tls: adds tls block under otlp/last9 with correct indent" {
+@test "inject_collector_tls: adds tls block under otlp_grpc/last9 with correct indent" {
     tmpdir=$(mktemp -d)
     cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/last9-otel-collector-values.yaml"
     func_body=$(collector_tls_func)
@@ -525,7 +525,7 @@ monitoring_tls_func() {
     cat > "$tmpdir/last9-otel-collector-values.yaml" <<'YAML'
 config:
   exporters:
-    otlp/last9:
+    otlp_grpc/last9:
       endpoint: "{{OTEL_ENDPOINT}}"
       tls:
         insecure: false

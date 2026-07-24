@@ -68,7 +68,7 @@ presets:
   # Best used with mode = deployment or statefulset.
   # See https://opentelemetry.io/docs/kubernetes/collector/components/#kubernetes-objects-receiver for details on the receiver.
   kubernetesEvents:
-    enabled: true
+    enabled: false
   # Configures the Kubernetes Cluster Receiver to collect cluster-level metrics.
   # Adds the k8s_cluster receiver to the metrics pipeline
   # and adds the necessary rules to ClusterRole.
@@ -129,7 +129,7 @@ config:
       verbosity: detailed
       sampling_initial: 5
       sampling_thereafter: 200
-    otlp/last9:
+    otlp_grpc/last9:
       endpoint: "{{OTEL_ENDPOINT}}"
       headers:
         "Authorization": "{{AUTH_TOKEN}}"
@@ -151,7 +151,7 @@ config:
       log_statements:
         - context: log
           statements:
-            - set(resource.attributes["service.name"], Concat([attributes["event.domain"], attributes["k8s.resource.name"]], "-"))
+            - set(resource.attributes["service.name"], Concat([log.attributes["event.domain"], log.attributes["k8s.resource.name"]], "-"))
             # Additional resource attributes can be set as follows.
             # Use additional resource attributes to differentiate between clusters and deployments.
             # set(resource.attributes["<key>"], value)
@@ -159,17 +159,17 @@ config:
             - set(resource.attributes["cluster.name"], "{{CLUSTER_NAME}}")
 
             # Set timestamp from event creation time
-            - set(time_unix_nano, UnixNano(Time(body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ"))) where time_unix_nano == 0
+            - set(log.time_unix_nano, UnixNano(Time(log.body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ"))) where log.time_unix_nano == 0
 
             # Set severity text
-            - set(severity_text, "INFO") where body["object"]["type"] == "Normal"
-            - set(severity_text, "WARN") where body["object"]["type"] == "Warning"
-            - set(severity_text, "ERROR") where body["object"]["type"] == "Error"
+            - set(log.severity_text, "INFO") where log.body["object"]["type"] == "Normal"
+            - set(log.severity_text, "WARN") where log.body["object"]["type"] == "Warning"
+            - set(log.severity_text, "ERROR") where log.body["object"]["type"] == "Error"
 
             # Set severity number
-            - set(severity_number, SEVERITY_NUMBER_INFO) where body["object"]["type"] == "Normal"
-            - set(severity_number, SEVERITY_NUMBER_WARN) where body["object"]["type"] == "Warning"
-            - set(severity_number, SEVERITY_NUMBER_ERROR) where body["object"]["type"] == "Error"
+            - set(log.severity_number, SEVERITY_NUMBER_INFO) where log.body["object"]["type"] == "Normal"
+            - set(log.severity_number, SEVERITY_NUMBER_WARN) where log.body["object"]["type"] == "Warning"
+            - set(log.severity_number, SEVERITY_NUMBER_ERROR) where log.body["object"]["type"] == "Error"
     memory_limiter/logs:
       # check_interval is the time between measurements of memory usage.
       check_interval: 5s
@@ -194,54 +194,54 @@ config:
             # (no "object" wrapper - that wrapper only exists in watch mode).
 
             # Extract resource kind and name
-            - set(attributes["k8s.resource.kind"], body["kind"])
-            - set(attributes["k8s.resource.name"], body["metadata"]["name"])
-            - set(attributes["k8s.namespace.name"], body["metadata"]["namespace"])
-            - set(attributes["k8s.resource.uid"], body["metadata"]["uid"])
+            - set(log.attributes["k8s.resource.kind"], log.body["kind"])
+            - set(log.attributes["k8s.resource.name"], log.body["metadata"]["name"])
+            - set(log.attributes["k8s.namespace.name"], log.body["metadata"]["namespace"])
+            - set(log.attributes["k8s.resource.uid"], log.body["metadata"]["uid"])
             # Resource age as an attribute (the record timestamp stays observed
             # time; see timestamp note at the end of this block)
-            - set(attributes["k8s.resource.created_at"], body["metadata"]["creationTimestamp"])
+            - set(log.attributes["k8s.resource.created_at"], log.body["metadata"]["creationTimestamp"])
 
             # Extract ownerReferences (first owner - most K8s objects have single owner)
-            - set(attributes["k8s.owner.kind"], body["metadata"]["ownerReferences"][0]["kind"]) where body["metadata"]["ownerReferences"] != nil
-            - set(attributes["k8s.owner.name"], body["metadata"]["ownerReferences"][0]["name"]) where body["metadata"]["ownerReferences"] != nil
-            - set(attributes["k8s.owner.uid"], body["metadata"]["ownerReferences"][0]["uid"]) where body["metadata"]["ownerReferences"] != nil
+            - set(log.attributes["k8s.owner.kind"], log.body["metadata"]["ownerReferences"][0]["kind"]) where log.body["metadata"]["ownerReferences"] != nil
+            - set(log.attributes["k8s.owner.name"], log.body["metadata"]["ownerReferences"][0]["name"]) where log.body["metadata"]["ownerReferences"] != nil
+            - set(log.attributes["k8s.owner.uid"], log.body["metadata"]["ownerReferences"][0]["uid"]) where log.body["metadata"]["ownerReferences"] != nil
 
             # Extract Pod-specific attributes
-            - set(attributes["k8s.pod.name"], body["metadata"]["name"]) where body["kind"] == "Pod"
-            - set(attributes["k8s.pod.phase"], body["status"]["phase"]) where body["kind"] == "Pod"
-            - set(attributes["k8s.pod.node"], body["spec"]["nodeName"]) where body["kind"] == "Pod"
-            - set(attributes["k8s.pod.serviceaccount"], body["spec"]["serviceAccountName"]) where body["kind"] == "Pod"
+            - set(log.attributes["k8s.pod.name"], log.body["metadata"]["name"]) where log.body["kind"] == "Pod"
+            - set(log.attributes["k8s.pod.phase"], log.body["status"]["phase"]) where log.body["kind"] == "Pod"
+            - set(log.attributes["k8s.pod.node"], log.body["spec"]["nodeName"]) where log.body["kind"] == "Pod"
+            - set(log.attributes["k8s.pod.serviceaccount"], log.body["spec"]["serviceAccountName"]) where log.body["kind"] == "Pod"
 
             # Extract Deployment-specific attributes
-            - set(attributes["k8s.deployment.name"], body["metadata"]["name"]) where body["kind"] == "Deployment"
-            - set(attributes["k8s.deployment.replicas"], body["spec"]["replicas"]) where body["kind"] == "Deployment"
-            - set(attributes["k8s.deployment.available_replicas"], body["status"]["availableReplicas"]) where body["kind"] == "Deployment"
+            - set(log.attributes["k8s.deployment.name"], log.body["metadata"]["name"]) where log.body["kind"] == "Deployment"
+            - set(log.attributes["k8s.deployment.replicas"], log.body["spec"]["replicas"]) where log.body["kind"] == "Deployment"
+            - set(log.attributes["k8s.deployment.available_replicas"], log.body["status"]["availableReplicas"]) where log.body["kind"] == "Deployment"
 
             # Extract ReplicaSet-specific attributes
-            - set(attributes["k8s.replicaset.name"], body["metadata"]["name"]) where body["kind"] == "ReplicaSet"
-            - set(attributes["k8s.replicaset.replicas"], body["spec"]["replicas"]) where body["kind"] == "ReplicaSet"
+            - set(log.attributes["k8s.replicaset.name"], log.body["metadata"]["name"]) where log.body["kind"] == "ReplicaSet"
+            - set(log.attributes["k8s.replicaset.replicas"], log.body["spec"]["replicas"]) where log.body["kind"] == "ReplicaSet"
 
             # Extract StatefulSet-specific attributes
-            - set(attributes["k8s.statefulset.name"], body["metadata"]["name"]) where body["kind"] == "StatefulSet"
-            - set(attributes["k8s.statefulset.replicas"], body["spec"]["replicas"]) where body["kind"] == "StatefulSet"
+            - set(log.attributes["k8s.statefulset.name"], log.body["metadata"]["name"]) where log.body["kind"] == "StatefulSet"
+            - set(log.attributes["k8s.statefulset.replicas"], log.body["spec"]["replicas"]) where log.body["kind"] == "StatefulSet"
 
             # Extract DaemonSet-specific attributes
-            - set(attributes["k8s.daemonset.name"], body["metadata"]["name"]) where body["kind"] == "DaemonSet"
-            - set(attributes["k8s.daemonset.desired"], body["status"]["desiredNumberScheduled"]) where body["kind"] == "DaemonSet"
-            - set(attributes["k8s.daemonset.ready"], body["status"]["numberReady"]) where body["kind"] == "DaemonSet"
+            - set(log.attributes["k8s.daemonset.name"], log.body["metadata"]["name"]) where log.body["kind"] == "DaemonSet"
+            - set(log.attributes["k8s.daemonset.desired"], log.body["status"]["desiredNumberScheduled"]) where log.body["kind"] == "DaemonSet"
+            - set(log.attributes["k8s.daemonset.ready"], log.body["status"]["numberReady"]) where log.body["kind"] == "DaemonSet"
 
             # Extract Service-specific attributes (selector stored as JSON for Pod<->Service linking)
-            - set(attributes["k8s.service.name"], body["metadata"]["name"]) where body["kind"] == "Service"
-            - set(attributes["k8s.service.type"], body["spec"]["type"]) where body["kind"] == "Service"
-            - set(attributes["k8s.service.cluster_ip"], body["spec"]["clusterIP"]) where body["kind"] == "Service"
-            - set(attributes["k8s.service.selector"], String(body["spec"]["selector"])) where body["kind"] == "Service" and body["spec"]["selector"] != nil
+            - set(log.attributes["k8s.service.name"], log.body["metadata"]["name"]) where log.body["kind"] == "Service"
+            - set(log.attributes["k8s.service.type"], log.body["spec"]["type"]) where log.body["kind"] == "Service"
+            - set(log.attributes["k8s.service.cluster_ip"], log.body["spec"]["clusterIP"]) where log.body["kind"] == "Service"
+            - set(log.attributes["k8s.service.selector"], String(log.body["spec"]["selector"])) where log.body["kind"] == "Service" and log.body["spec"]["selector"] != nil
 
             # Extract Ingress-specific attributes
-            - set(attributes["k8s.ingress.name"], body["metadata"]["name"]) where body["kind"] == "Ingress"
+            - set(log.attributes["k8s.ingress.name"], log.body["metadata"]["name"]) where log.body["kind"] == "Ingress"
 
             # Extract labels as attributes for selector matching
-            - merge_maps(attributes, body["metadata"]["labels"], "upsert") where body["metadata"]["labels"] != nil
+            - merge_maps(log.attributes, log.body["metadata"]["labels"], "upsert") where log.body["metadata"]["labels"] != nil
 
             # Timestamp: intentionally NOT set from creationTimestamp.
             # Pull mode re-emits objects every interval; stamping snapshots with the
@@ -263,9 +263,18 @@ config:
             static_configs:
               - targets:
                   - ${env:MY_POD_IP}:8888
+    # K8s events receiver (watch mode) — configured explicitly to use k8s_objects (not deprecated k8sobjects alias)
+    k8s_objects:
+      auth_type: serviceAccount
+      objects:
+        - name: events
+          mode: watch
+          group: events.k8s.io
+          exclude_watch_type:
+            - DELETED
     # K8s resource topology receiver - collects ownerReferences and selectors for dependency graphs
     # Pulls full object metadata periodically to enable resource relationship visualization
-    k8sobjects/topology:
+    k8s_objects/topology:
       auth_type: serviceAccount
       objects:
         # Pods with ownerReferences to link to Deployments/ReplicaSets/StatefulSets/DaemonSets
@@ -315,30 +324,51 @@ config:
                 prometheus:
                   host: ${env:MY_POD_IP}
                   port: 8888
+      resource:
+        host.name: null
+        k8s.namespace.name: null
+        k8s.node.ip: null
+        k8s.node.name: null
+        k8s.pod.ip: null
+        k8s.pod.name: null
+        attributes:
+          - name: host.name
+            value: ${env:OTEL_K8S_NODE_NAME}
+          - name: k8s.namespace.name
+            value: ${env:OTEL_K8S_NAMESPACE}
+          - name: k8s.node.ip
+            value: ${env:OTEL_K8S_NODE_IP}
+          - name: k8s.node.name
+            value: ${env:OTEL_K8S_NODE_NAME}
+          - name: k8s.pod.ip
+            value: ${env:OTEL_K8S_POD_IP}
+          - name: k8s.pod.name
+            value: ${env:OTEL_K8S_POD_NAME}
     extensions:
       - health_check
     pipelines:
       logs:
         receivers:
           - otlp
+          - k8s_objects
         processors:
           - memory_limiter/logs
-          - k8sattributes
+          - k8s_attributes
           - transform/logs/last9
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
       # K8s resource topology pipeline - collects resource relationships for dependency graphs
       # Data is queryable via service_name="k8s-topology" in Last9 logs
       logs/topology:
         receivers:
-          - k8sobjects/topology
+          - k8s_objects/topology
         processors:
           - memory_limiter/logs
           - transform/topology
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
       metrics:
         receivers:
           - otlp
@@ -346,14 +376,14 @@ config:
         processors:
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
       traces:
         receivers:
           - otlp
         processors:
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
  
 
 # Helm currently has an issue (https://github.com/helm/helm/pull/12879) when using null to remove

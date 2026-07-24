@@ -1310,7 +1310,7 @@ update_otel_endpoint() {
     fi
 }
 
-# Inject a TLS server_name_override under the otlp/last9 exporter of a collector
+# Inject a TLS server_name_override under the otlp_grpc/last9 exporter of a collector
 # values file. Used when the OTLP endpoint terminates TLS behind a proxy/NLB whose
 # certificate name differs from the connection host. No-op when SERVER_NAME is empty
 # (default), so existing installs are byte-identical. Idempotent on re-run.
@@ -1337,20 +1337,20 @@ inject_collector_tls_server_name() {
         log_info "Created backup: $file.backup"
     fi
 
-    # Does the otlp/last9 block already have a real (uncommented) tls: child? If so we
+    # Does the otlp_grpc/last9 block already have a real (uncommented) tls: child? If so we
     # add server_name_override under it rather than emitting a second tls: key (which
     # would be a duplicate map key). Commented "# tls:" examples elsewhere don't match.
     local has_tls
     has_tls=$(awk '
-        /^    otlp\/last9:[[:space:]]*$/ { in_block=1; next }
+        /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; next }
         in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
         in_block && /^      tls:[[:space:]]*$/ { print "yes"; exit }
     ' "$file")
 
     if [ -n "$has_tls" ]; then
-        # Insert server_name_override as a child of the existing otlp/last9 tls: block.
+        # Insert server_name_override as a child of the existing otlp_grpc/last9 tls: block.
         awk -v sni="$SERVER_NAME" '
-            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print
@@ -1360,12 +1360,12 @@ inject_collector_tls_server_name() {
             }
         ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
     else
-        # No tls block yet: anchor on the otlp/last9: exporter block (4-space key) and
+        # No tls block yet: anchor on the otlp_grpc/last9: exporter block (4-space key) and
         # insert a fresh tls block after its 6-space endpoint: line. This avoids the
         # decoy endpoint: lines for health_check, the otlp receivers, and
         # internalTelemetryViaOTLP, which live in other blocks.
         awk -v sni="$SERVER_NAME" '
-            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+            /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print

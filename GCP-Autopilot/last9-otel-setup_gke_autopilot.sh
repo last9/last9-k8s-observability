@@ -390,7 +390,7 @@ EVENTS_VALUES=$(replace_placeholders "$SCRIPT_DIR/last9-kube-events-agent-values
 helm install last9-kube-events-agent open-telemetry/opentelemetry-collector \
   --namespace $NAMESPACE \
   --values "$EVENTS_VALUES" \
-  --version 0.125.0 \
+  --version 0.165.0 \
   --wait \
   --timeout 5m 
 
