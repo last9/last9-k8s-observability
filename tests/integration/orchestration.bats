@@ -136,6 +136,22 @@ run_monitoring_only() {
 }
 
 # ---------------------------------------------------------------------------
+# setup_helm_repos retry / fail-fast (PR #36)
+# ---------------------------------------------------------------------------
+
+@test "helm repo failure retries 3 times then exits before chart install" {
+    export SIMULATE_HELM_REPO_FAILURE=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Failed to add/update Helm repositories"* ]]
+    [ "$(echo "$output" | grep -c 'retrying')" -eq 2 ]
+    ! echo "$output" | grep -q 'attempt 3/3), retrying'
+    # Each failed attempt stops at the first repo add in the && chain.
+    [ "$(grep -c '^repo add open-telemetry' "$HELM_CALLS_LOG")" -eq 3 ]
+    ! grep -q "upgrade --install" "$HELM_CALLS_LOG"
+}
+
+# ---------------------------------------------------------------------------
 # Uninstall instrumentation scoping (PR #37)
 # ---------------------------------------------------------------------------
 

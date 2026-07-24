@@ -1713,14 +1713,28 @@ setup_helm_repos() {
     # Enable --skip-schema-validation if this Helm supports it (compatibility)
     detect_helm_schema_flag
 
-    helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    # Update only the repos we add — a bare `helm repo update` refreshes every
-    # repo in the user's Helm config, which is slow and fails noisily when other
-    # (unrelated) repos have stale/dead URLs.
-    helm repo update open-telemetry prometheus-community
+    # `helm repo add`/`update` fetch index.yaml over the network and can hit
+    # transient TLS resets. Neither call was checked, so a failed add silently
+    # left the repo missing and the script limped on for ~150 more lines
+    # (CRD adoption, etc.) before crashing at the `helm template` step with a
+    # confusing "repo not found" error. Retry a few times and fail fast here
+    # instead, before any state-mutating steps run.
+    local attempt
+    for attempt in 1 2 3; do
+        if helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts && \
+           helm repo add prometheus-community https://prometheus-community.github.io/helm-charts && \
+           helm repo update open-telemetry prometheus-community; then
+            log_info "Helm repositories updated!"
+            return 0
+        fi
+        if [ "$attempt" -lt 3 ]; then
+            log_warn "Helm repo add/update failed (attempt $attempt/3), retrying..."
+            sleep 5
+        fi
+    done
 
-    log_info "Helm repositories updated!"
+    log_error "Failed to add/update Helm repositories (open-telemetry, prometheus-community) after 3 attempts."
+    log_error "Check network connectivity to open-telemetry.github.io and prometheus-community.github.io."
 }
 
 # Adopt pre-existing OTel CRDs into this Helm release so that
