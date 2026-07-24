@@ -134,3 +134,14 @@ run_monitoring_only() {
     [ "$status" -eq 0 ]
     ! grep -q -- "--kube-context" "$HELM_CALLS_LOG"
 }
+
+# ---------------------------------------------------------------------------
+# Uninstall instrumentation scoping (PR #37)
+# ---------------------------------------------------------------------------
+
+@test "uninstall deletes only l9-instrumentation, not instrumentations --all" {
+  run bash -c "printf 'y\nn\nn\nn\n' | bash '$SCRIPT' uninstall"
+  [ "$status" -eq 0 ]
+  grep -q "delete instrumentation l9-instrumentation" "$KUBECTL_CALLS_LOG"
+  ! grep -q "delete instrumentations --all" "$KUBECTL_CALLS_LOG"
+}

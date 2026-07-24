@@ -591,3 +591,111 @@ YAML
     [[ "$output" == *"          serverName: metrics.last9.io"* ]]
     rm -rf "$tmpdir"
 }
+
+# ---------------------------------------------------------------------------
+# update_deployment_environment / activate_deployment_environment_in_values
+# ---------------------------------------------------------------------------
+
+load_deployment_env_helpers() {
+    helm()    { :; }
+    kubectl() { :; }
+    git()     { :; }
+    export -f helm kubectl git
+
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+
+    eval "$(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")"
+    eval "$(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")"
+    eval "$(awk '/^log_error\(\)/,/^}/' "$SCRIPT")"
+    eval "$(awk '/^log_warn\(\)/,/^}/' "$SCRIPT")"
+    eval "$(awk '/^log_info\(\)/,/^}/' "$SCRIPT")"
+    eval "$(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")"
+}
+
+@test "update_deployment_environment: env=production stamps collector, events, instrumentation" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/"
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+    cp "$BATS_TEST_DIRNAME/../instrumentation.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        $(declare -f load_deployment_env_helpers 2>/dev/null || true)
+        helm() { :; }; kubectl() { :; }; git() { :; }
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")
+        update_deployment_environment production
+        grep -c 'deployment.environment\", \"production\"' last9-otel-collector-values.yaml
+        grep 'resource.attributes\[\"deployment.environment\"\], \"production\"' last9-kube-events-agent-values.yaml
+        grep -c 'deployment.environment=production' instrumentation.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"resource.attributes[\"deployment.environment\"], \"production\""* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "update_deployment_environment: empty env leaves placeholders unset" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")
+        update_deployment_environment ''
+        grep '@DEPLOYMENT_ENVIRONMENT@' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"@DEPLOYMENT_ENVIRONMENT@"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "update_deployment_environment: re-run updates existing OTTL lines" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")
+        update_deployment_environment production
+        update_deployment_environment staging
+        grep 'resource.attributes\[\"deployment.environment\"\], \"staging\"' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"staging"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "update_deployment_environment: rejects unsafe env values" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")
+        update_deployment_environment 'prod\"; malicious'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid deployment environment"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+    rm -rf "$tmpdir"
+}
