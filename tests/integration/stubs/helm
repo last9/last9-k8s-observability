@@ -3,10 +3,12 @@
 # Logs every invocation to $HELM_CALLS_LOG and simulates responses.
 #
 # Env flags:
-#   HELM_CALLS_LOG              file to append each call to (full arg string)
-#   SIMULATE_HELM_FAILURE       "1" → `helm upgrade --install` exits non-zero
-#   SIMULATE_HELM_REPO_FAILURE  "1" → `helm repo add|update` exits non-zero
-#   MOCK_HELM_VERSION           version string for `helm version --short` (default v3.14.0)
+#   HELM_CALLS_LOG                  file to append each call to (full arg string)
+#   SIMULATE_HELM_FAILURE           "1" → `helm upgrade --install` exits non-zero always
+#   SIMULATE_HELM_TRANSIENT_FAILURE "1" → fail once, then succeed (retry path)
+#   SIMULATE_HELM_REPO_FAILURE      "1" → `helm repo add|update` exits non-zero
+#   SIMULATE_EXISTING_COLLECTOR_RELEASE "1" → `helm list` reports an existing collector release
+#   MOCK_HELM_VERSION               version string for `helm version --short` (default v3.14.0)
 
 [ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
 
@@ -38,9 +40,35 @@ case "$cmd" in
             echo "Error: UPGRADE FAILED: simulated helm failure" >&2
             exit 1
         fi
+        if [ "$SIMULATE_HELM_TRANSIENT_FAILURE" = "1" ]; then
+            fail_log="${HELM_CALLS_LOG}.failcount"
+            count=0
+            [ -f "$fail_log" ] && count=$(cat "$fail_log")
+            count=$((count + 1))
+            echo "$count" > "$fail_log"
+            if [ "$count" -eq 1 ]; then
+                echo "Error: UPGRADE FAILED: simulated transient helm failure" >&2
+                exit 1
+            fi
+        fi
         exit 0
         ;;
     "uninstall "*)
+        exit 0
+        ;;
+    list\ *)
+        if echo "$cmd" | grep -q 'last9-opentelemetry-collector' \
+            && [ "$SIMULATE_EXISTING_COLLECTOR_RELEASE" = "1" ]; then
+            if echo "$cmd" | grep -q -- '-o json'; then
+                echo '[{"name":"last9-opentelemetry-collector","chart":"opentelemetry-collector-0.126.0"}]'
+            else
+                echo "last9-opentelemetry-collector"
+            fi
+            exit 0
+        fi
+        if echo "$cmd" | grep -q -- '-o json'; then
+            echo '[]'
+        fi
         exit 0
         ;;
     *)

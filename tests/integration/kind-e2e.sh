@@ -15,6 +15,7 @@
 #   logs-only        Collector for logs
 #   monitoring-only  kube-prometheus-stack (metrics)
 #   events-only      Kubernetes events agent
+#   full-install     Default customer path: operator + collector + monitoring + events
 #   crd-conflict     Pre-seed Terraform-owned Prometheus CRDs, then monitoring-only
 #   operator-crd-conflict  Pre-seed foreign-owned OTel CRDs, then operator-only
 #   context          monitoring-only pinned to an explicit kubectl context
@@ -169,6 +170,22 @@ test_events_only() {
     info "✓ events-only passed"
 }
 
+# README "Install Everything" path — one cluster, all components together (not the
+# partial *-only modes). Matches the default branch of last9-otel-setup.sh when
+# no mode flag is passed.
+test_full_install() {
+    create_cluster "${CLUSTER_PREFIX}-full"
+    run_setup token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP" \
+        monitoring-endpoint="$DUMMY_METRICS" username="$DUMMY_USER" password="$DUMMY_PASS"
+    assert_rollout deployment opentelemetry-operator
+    assert_pods_ready "app.kubernetes.io/name=last9-otel-collector"
+    assert_resource_exists instrumentation l9-instrumentation
+    assert_resource_exists prometheusagent last9-k8s-monitoring-kube-prometheus
+    assert_rollout deployment last9-k8s-monitoring-kube-state-metrics
+    assert_pods_ready "app.kubernetes.io/name=last9-kube-events-agent"
+    info "✓ full-install passed"
+}
+
 # Reproduce the customer failure: Prometheus CRDs already on the cluster, owned
 # by a non-Helm field manager (terraform-provider-helm). The script must detect
 # them, pass --skip-crds, and still install successfully.
@@ -275,6 +292,7 @@ main() {
         logs-only)       test_logs_only ;;
         monitoring-only) test_monitoring_only ;;
         events-only)     test_events_only ;;
+        full-install)    test_full_install ;;
         crd-conflict)    test_crd_conflict ;;
         operator-crd-conflict) test_operator_crd_conflict ;;
         context)         test_context ;;
@@ -283,12 +301,13 @@ main() {
             test_logs_only;              cleanup_cluster
             test_monitoring_only;        cleanup_cluster
             test_events_only;            cleanup_cluster
+            test_full_install;           cleanup_cluster
             test_crd_conflict;           cleanup_cluster
             test_operator_crd_conflict;  cleanup_cluster
             test_context
             ;;
         *)
-            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|crd-conflict|operator-crd-conflict|context|all>" >&2
+            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|full-install|crd-conflict|operator-crd-conflict|context|all>" >&2
             exit 1
             ;;
     esac

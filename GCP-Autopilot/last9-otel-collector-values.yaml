@@ -129,7 +129,7 @@ config:
       verbosity: detailed
       sampling_initial: 5
       sampling_thereafter: 200
-    otlp/last9:
+    otlp_grpc/last9:
       endpoint: "{{OTEL_ENDPOINT}}"
       headers:
         "Authorization": "{{AUTH_TOKEN}}"
@@ -206,6 +206,26 @@ config:
                 prometheus:
                   host: ${env:MY_POD_IP}
                   port: 8888
+      resource:
+        host.name: null
+        k8s.namespace.name: null
+        k8s.node.ip: null
+        k8s.node.name: null
+        k8s.pod.ip: null
+        k8s.pod.name: null
+        attributes:
+          - name: host.name
+            value: ${env:OTEL_K8S_NODE_NAME}
+          - name: k8s.namespace.name
+            value: ${env:OTEL_K8S_NAMESPACE}
+          - name: k8s.node.ip
+            value: ${env:OTEL_K8S_NODE_IP}
+          - name: k8s.node.name
+            value: ${env:OTEL_K8S_NODE_NAME}
+          - name: k8s.pod.ip
+            value: ${env:OTEL_K8S_POD_IP}
+          - name: k8s.pod.name
+            value: ${env:OTEL_K8S_POD_NAME}
     extensions:
       - health_check
     pipelines:
@@ -215,11 +235,11 @@ config:
           # filelog removed for GKE Autopilot compatibility
         processors:
           - memory_limiter/logs
-          - k8sattributes
+          - k8s_attributes
           - transform/logs/last9
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
       metrics:
         receivers:
           - otlp
@@ -228,7 +248,7 @@ config:
           - transform/metrics/last9
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
       traces:
         receivers:
           - otlp
@@ -236,7 +256,7 @@ config:
           - transform/traces/last9
           - batch
         exporters:
-          - otlp/last9
+          - otlp_grpc/last9
  
 
 # Helm currently has an issue (https://github.com/helm/helm/pull/12879) when using null to remove
@@ -261,7 +281,7 @@ image:
   repository: "otel/opentelemetry-collector-contrib"
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "0.126.0"
+  tag: "0.156.0"
   # When digest is set to a non-empty value, images will be pulled by digest (regardless of tag value).
   digest: ""
 imagePullSecrets: []

@@ -31,7 +31,7 @@ set -e  # Exit on any error
 # Configuration defaults
 NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
-COLLECTOR_VERSION="0.126.0"
+COLLECTOR_VERSION="0.165.0"
 MONITORING_VERSION="75.15.1"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
@@ -198,6 +198,144 @@ detect_helm_schema_flag() {
         HELM_SCHEMA_FLAG="--skip-schema-validation"
         log_info "Helm supports --skip-schema-validation — enabling it to tolerate upstream chart schema quirks"
     fi
+}
+
+# Return the Last9 OTLP exporter map key in a collector values file (otlp_grpc/last9
+# or legacy otlp/last9). Empty when neither is present.
+_collector_last9_exporter_key() {
+    local file="$1"
+    if grep -qE '^    otlp_grpc/last9:[[:space:]]*$' "$file"; then
+        printf '%s' 'otlp_grpc/last9'
+    elif grep -qE '^    otlp/last9:[[:space:]]*$' "$file"; then
+        printf '%s' 'otlp/last9'
+    fi
+}
+
+# True when a values file still uses pre-0.156 collector component names.
+_collector_values_has_legacy_keys() {
+    local file="$1"
+    grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' "$file"
+}
+
+# True when presets.kubernetesEvents.enabled is true (deprecated with chart 0.165+).
+_collector_values_has_kubernetes_events_preset_enabled() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    awk '/^  kubernetesEvents:/{f=1} f && /^    enabled: true/{found=1; exit} END{exit !found}' "$file"
+}
+
+# Compare dotted version strings (e.g. 0.126.0 < 0.165.0).
+version_lt() {
+    local a="$1" b="$2"
+    [ "$(printf '%s\n' "$a" "$b" | sort -V | head -1)" = "$a" ] && [ "$a" != "$b" ]
+}
+
+_helm_release_exists() {
+    local release="$1" ns="$2"
+    helm list -n "$ns" --filter "^${release}$" -q 2>/dev/null | grep -qx "$release"
+}
+
+# Chart version from an installed Helm release (e.g. 0.126.0), or empty when absent.
+_helm_release_chart_version() {
+    local release="$1" ns="$2"
+    helm list -n "$ns" --filter "^${release}$" -o json 2>/dev/null \
+        | tr -d '\n' \
+        | sed -n 's/.*"chart":"[^"]*-\([^"]*\)".*/\1/p' \
+        | head -1
+}
+
+# Migrate deprecated OTel collector config keys in a helm values file so chart
+# 0.165.0 / collector 0.156.0 accept custom -f overrides from pre-0.156 installs.
+# Idempotent — safe on already-migrated files (no-op).
+migrate_collector_values_for_0165() {
+    local file="$1"
+
+    [ -f "$file" ] || return 0
+
+    if ! _collector_values_has_legacy_keys "$file"; then
+        return 0
+    fi
+
+    log_info "Migrating deprecated collector config keys in $file for chart $COLLECTOR_VERSION..."
+
+    if [ ! -f "${file}.backup-migrate" ]; then
+        cp "$file" "${file}.backup-migrate"
+        log_info "Created backup: ${file}.backup-migrate"
+    fi
+
+    # Order matters: longest/most-specific patterns first.
+    sed -i.tmp \
+        -e 's|k8sobjects/topology|k8s_objects/topology|g' \
+        -e 's|otlp/last9|otlp_grpc/last9|g' \
+        -e 's|k8sattributes|k8s_attributes|g' \
+        -e 's|k8sobjects|k8s_objects|g' \
+        "$file"
+    rm -f "${file}.tmp"
+
+    log_info "✓ Migrated $file (otlp→otlp_grpc, k8sattributes→k8s_attributes, k8sobjects→k8s_objects)"
+}
+
+# Pre-upgrade sanity checks for collector chart installs. When an existing release
+# is detected, call out the upgrade path and any values issues before helm runs.
+# Optional release_name — omit on fresh installs that have no release yet.
+prepare_collector_values_file() {
+    local values_file="$1"
+    local release_name="${2:-}"
+    local component_label="${3:-OpenTelemetry Collector}"
+
+    [ -f "$values_file" ] || return 0
+
+    local current_chart=""
+    if [ -n "$release_name" ] && _helm_release_exists "$release_name" "$NAMESPACE"; then
+        current_chart=$(_helm_release_chart_version "$release_name" "$NAMESPACE")
+        log_warn "Upgrade detected: $component_label release '$release_name' is already installed."
+        if [ -n "$current_chart" ]; then
+            log_warn "  Current chart: opentelemetry-collector-$current_chart → target: $COLLECTOR_VERSION (collector image 0.156.0)."
+            if version_lt "$current_chart" "0.165.0"; then
+                log_warn "  Chart <$COLLECTOR_VERSION uses renamed collector components (otlp_grpc, k8s_attributes, k8s_objects)."
+            fi
+        else
+            log_warn "  Upgrading to opentelemetry-collector chart $COLLECTOR_VERSION (collector image 0.156.0)."
+        fi
+        log_warn "  Expect a one-time collector pod restart during the upgrade."
+    fi
+
+    if _collector_values_has_legacy_keys "$values_file"; then
+        log_warn "  $values_file uses deprecated collector config keys (otlp/last9, k8sattributes, and/or k8sobjects)."
+        log_warn "  These will be rewritten automatically; backup saved as ${values_file}.backup-migrate."
+    fi
+
+    if _collector_values_has_kubernetes_events_preset_enabled "$values_file"; then
+        log_warn "  $values_file has presets.kubernetesEvents.enabled: true (removed in chart $COLLECTOR_VERSION)."
+        log_warn "  Disable that preset and configure an explicit k8s_objects receiver — see bundled last9-kube-events-agent-values.yaml."
+    fi
+
+    migrate_collector_values_for_0165 "$values_file"
+
+    if _collector_values_has_kubernetes_events_preset_enabled "$values_file"; then
+        log_warn "  Action required before upgrade can succeed: disable presets.kubernetesEvents in $values_file."
+    fi
+}
+
+# Retry helm upgrade --install on transient failures (chart download 5xx, network blips).
+# All arguments are forwarded verbatim to `helm upgrade --install`.
+helm_upgrade_install_with_retry() {
+    local max_attempts="${HELM_INSTALL_RETRIES:-3}"
+    local attempt=1
+    local delay="${HELM_INSTALL_RETRY_DELAY:-5}"
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if helm upgrade --install "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            log_warn "Helm upgrade --install failed (attempt ${attempt}/${max_attempts}); retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 1
 }
 
 # Load and parse tolerations from YAML file
@@ -1100,6 +1238,18 @@ setup_context_wrappers() {
 # Function to check prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
+
+    # Individual function= invocations validate their own arguments in main().
+    if [ -n "$FUNCTION_TO_EXECUTE" ]; then
+        command -v helm >/dev/null 2>&1 || log_error "helm is required but not installed. Aborting."
+        command -v kubectl >/dev/null 2>&1 || log_error "kubectl is required but not installed. Aborting."
+        if [ "$UNINSTALL_MODE" = false ]; then
+            command -v git >/dev/null 2>&1 || log_error "git is required but not installed. Aborting."
+        fi
+        kubectl cluster-info >/dev/null 2>&1 || log_error "kubectl cannot connect to cluster. Aborting."
+        log_info "Prerequisites check passed!"
+        return 0
+    fi
     
     # Skip token check for uninstall mode, logs-only mode, monitoring-only mode, and events-only mode
     # Note: operator-only mode will check for token later in its specific section
@@ -1189,6 +1339,9 @@ setup_repository() {
     done
 
     log_info "Repository setup completed!"
+
+    # Upgrade custom/local values that still use pre-0.156 collector config keys.
+    prepare_collector_values_file "last9-otel-collector-values.yaml" "" "OpenTelemetry Collector"
 
     # Update auth token and endpoint in the values file
     update_auth_token
@@ -1310,7 +1463,7 @@ update_otel_endpoint() {
     fi
 }
 
-# Inject a TLS server_name_override under the otlp/last9 exporter of a collector
+# Inject a TLS server_name_override under the otlp_grpc/last9 exporter of a collector
 # values file. Used when the OTLP endpoint terminates TLS behind a proxy/NLB whose
 # certificate name differs from the connection host. No-op when SERVER_NAME is empty
 # (default), so existing installs are byte-identical. Idempotent on re-run.
@@ -1330,6 +1483,13 @@ inject_collector_tls_server_name() {
         return 0
     fi
 
+    local exporter_key
+    exporter_key=$(_collector_last9_exporter_key "$file")
+    if [ -z "$exporter_key" ]; then
+        log_warn "⚠ No otlp_grpc/last9 or otlp/last9 exporter in $file, skipping TLS injection"
+        return 0
+    fi
+
     log_info "Injecting TLS server_name_override ($SERVER_NAME) into $file..."
 
     if [ ! -f "$file.backup" ]; then
@@ -1337,20 +1497,20 @@ inject_collector_tls_server_name() {
         log_info "Created backup: $file.backup"
     fi
 
-    # Does the otlp/last9 block already have a real (uncommented) tls: child? If so we
+    # Does the otlp_grpc/last9 block already have a real (uncommented) tls: child? If so we
     # add server_name_override under it rather than emitting a second tls: key (which
     # would be a duplicate map key). Commented "# tls:" examples elsewhere don't match.
     local has_tls
-    has_tls=$(awk '
-        /^    otlp\/last9:[[:space:]]*$/ { in_block=1; next }
+    has_tls=$(awk -v key="$exporter_key" '
+        $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; next }
         in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
         in_block && /^      tls:[[:space:]]*$/ { print "yes"; exit }
     ' "$file")
 
     if [ -n "$has_tls" ]; then
-        # Insert server_name_override as a child of the existing otlp/last9 tls: block.
-        awk -v sni="$SERVER_NAME" '
-            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+        # Insert server_name_override as a child of the existing Last9 exporter tls: block.
+        awk -v key="$exporter_key" -v sni="$SERVER_NAME" '
+            $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print
@@ -1360,12 +1520,12 @@ inject_collector_tls_server_name() {
             }
         ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
     else
-        # No tls block yet: anchor on the otlp/last9: exporter block (4-space key) and
+        # No tls block yet: anchor on the Last9 exporter block (4-space key) and
         # insert a fresh tls block after its 6-space endpoint: line. This avoids the
         # decoy endpoint: lines for health_check, the otlp receivers, and
         # internalTelemetryViaOTLP, which live in other blocks.
-        awk -v sni="$SERVER_NAME" '
-            /^    otlp\/last9:[[:space:]]*$/ { in_block=1; print; next }
+        awk -v key="$exporter_key" -v sni="$SERVER_NAME" '
+            $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print
@@ -2025,8 +2185,10 @@ install_collector() {
         values_file="$VALUES_FILE"
         log_info "Using custom values file: $values_file"
     fi
+
+    prepare_collector_values_file "$values_file" "last9-opentelemetry-collector" "OpenTelemetry Collector"
     
-    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+    if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
         -n "$NAMESPACE" \
         --create-namespace \
@@ -2331,17 +2493,21 @@ setup_last9_monitoring() {
         # chart's CRD manifests directly with --force-conflicts so the schemas are
         # updated to the version the chart requires (e.g. PrometheusAgent.spec.tsdb,
         # ServiceMonitor trackTimestampsStaleness) without removing the CRDs.
-        helm show crds prometheus-community/kube-prometheus-stack \
-            --version "$MONITORING_VERSION" 2>/dev/null \
-            | kubectl apply --server-side --force-conflicts \
-              --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+        local crd_yaml=""
+        if crd_yaml=$(helm show crds prometheus-community/kube-prometheus-stack \
+                --version "$MONITORING_VERSION" 2>/dev/null) && [ -n "$crd_yaml" ]; then
+            echo "$crd_yaml" | kubectl apply --server-side --force-conflicts \
+                --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+        else
+            log_warn "Could not fetch chart CRD manifests; skipping schema upgrade (install will use --skip-crds)"
+        fi
         skip_crds_flag="--skip-crds"
     fi
     adopt_prometheus_crds
 
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
-    if ! helm upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
         --version "$MONITORING_VERSION" \
         -n "$NAMESPACE" \
         -f k8s-monitoring-values.yaml \
@@ -2463,6 +2629,8 @@ install_events_agent() {
     update_events_agent_auth_token
     update_events_agent_endpoint
 
+    prepare_collector_values_file "last9-kube-events-agent-values.yaml" "last9-kube-events-agent" "Kubernetes Events Agent"
+
     # Inject TLS server name override if provided (no-op when unset)
     inject_collector_tls_server_name "last9-kube-events-agent-values.yaml"
 
@@ -2471,8 +2639,8 @@ install_events_agent() {
 
     # Install/upgrade the events agent
     log_info "Installing/upgrading Last9 Kubernetes Events Agent..."
-    if ! helm upgrade --install last9-kube-events-agent open-telemetry/opentelemetry-collector \
-        --version 0.125.0 \
+    if ! helm_upgrade_install_with_retry last9-kube-events-agent open-telemetry/opentelemetry-collector \
+        --version 0.165.0 \
         -n "$NAMESPACE" \
         --create-namespace \
         -f last9-kube-events-agent-values.yaml \
@@ -2912,7 +3080,8 @@ main() {
                     
                     # For individual function calls with custom values, use as-is (no token replacement)
                     log_info "Using values file as-is for individual function call"
-                    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+                    prepare_collector_values_file "$VALUES_FILE" "last9-opentelemetry-collector" "OpenTelemetry Collector"
+                    if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
                         --create-namespace \

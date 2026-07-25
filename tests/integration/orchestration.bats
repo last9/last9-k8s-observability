@@ -15,6 +15,7 @@ setup() {
 
     export PATH="$STUBS:$PATH"
     export REPO_SRC="$REPO_ROOT"
+    export HELM_INSTALL_RETRY_DELAY=0
 
     # Per-test call logs
     export KUBECTL_CALLS_LOG="$BATS_TEST_TMPDIR/kubectl.log"
@@ -73,6 +74,16 @@ run_monitoring_only() {
     run_monitoring_only
     [[ "$output" == *"[ERROR]"* ]]
     [[ "$output" == *"Helm install/upgrade failed"* ]]
+}
+
+@test "helm install retries on transient failure then succeeds" {
+    export SIMULATE_HELM_TRANSIENT_FAILURE=1
+    export HELM_INSTALL_RETRY_DELAY=0
+    rm -f "${HELM_CALLS_LOG}.failcount"
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'upgrade --install last9-k8s-monitoring' "$HELM_CALLS_LOG")" -eq 2 ]
+    [[ "$output" == *"retrying"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -149,6 +160,58 @@ run_monitoring_only() {
     # Each failed attempt stops at the first repo add in the && chain.
     [ "$(grep -c '^repo add open-telemetry' "$HELM_CALLS_LOG")" -eq 3 ]
     ! grep -q "upgrade --install" "$HELM_CALLS_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Custom values migration (pre-0.156 collector config keys)
+# ---------------------------------------------------------------------------
+
+@test "install_collector with legacy custom values migrates keys before helm" {
+    cat > legacy-values.yaml <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "https://example"
+  processors:
+    k8sattributes:
+      {}
+  receivers:
+    k8sobjects/topology:
+      auth_type: serviceAccount
+  service:
+    pipelines:
+      logs:
+        processors:
+          - k8sattributes
+        exporters:
+          - otlp/last9
+YAML
+    run bash "$SCRIPT" function=install_collector token=tok endpoint=https://example.com values=legacy-values.yaml
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deprecated collector config keys"* ]]
+    grep -q 'otlp_grpc/last9' legacy-values.yaml
+    ! grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' legacy-values.yaml
+    grep -q 'upgrade --install last9-opentelemetry-collector' "$HELM_CALLS_LOG"
+}
+
+@test "install_collector upgrade calls out existing release before helm" {
+    export SIMULATE_EXISTING_COLLECTOR_RELEASE=1
+    cat > legacy-values.yaml <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "https://example"
+  service:
+    pipelines:
+      logs:
+        exporters:
+          - otlp/last9
+YAML
+    run bash "$SCRIPT" function=install_collector token=tok endpoint=https://example.com values=legacy-values.yaml
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Upgrade detected"* ]]
+    [[ "$output" == *"0.126.0"* ]]
+    grep -q 'upgrade --install last9-opentelemetry-collector' "$HELM_CALLS_LOG"
 }
 
 # ---------------------------------------------------------------------------
