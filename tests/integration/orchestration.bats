@@ -15,6 +15,7 @@ setup() {
 
     export PATH="$STUBS:$PATH"
     export REPO_SRC="$REPO_ROOT"
+    export HELM_INSTALL_RETRY_DELAY=0
 
     # Per-test call logs
     export KUBECTL_CALLS_LOG="$BATS_TEST_TMPDIR/kubectl.log"
@@ -73,6 +74,16 @@ run_monitoring_only() {
     run_monitoring_only
     [[ "$output" == *"[ERROR]"* ]]
     [[ "$output" == *"Helm install/upgrade failed"* ]]
+}
+
+@test "helm install retries on transient failure then succeeds" {
+    export SIMULATE_HELM_TRANSIENT_FAILURE=1
+    export HELM_INSTALL_RETRY_DELAY=0
+    rm -f "${HELM_CALLS_LOG}.failcount"
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [ "$(grep -c 'upgrade --install last9-k8s-monitoring' "$HELM_CALLS_LOG")" -eq 2 ]
+    [[ "$output" == *"retrying"* ]]
 }
 
 # ---------------------------------------------------------------------------

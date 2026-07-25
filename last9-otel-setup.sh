@@ -200,6 +200,27 @@ detect_helm_schema_flag() {
     fi
 }
 
+# Retry helm upgrade --install on transient failures (chart download 5xx, network blips).
+# All arguments are forwarded verbatim to `helm upgrade --install`.
+helm_upgrade_install_with_retry() {
+    local max_attempts="${HELM_INSTALL_RETRIES:-3}"
+    local attempt=1
+    local delay="${HELM_INSTALL_RETRY_DELAY:-5}"
+
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if helm upgrade --install "$@"; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$max_attempts" ]; then
+            log_warn "Helm upgrade --install failed (attempt ${attempt}/${max_attempts}); retrying in ${delay}s..."
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 # Load and parse tolerations from YAML file
 load_tolerations_from_file() {
     local file_path="$1"
@@ -2026,7 +2047,7 @@ install_collector() {
         log_info "Using custom values file: $values_file"
     fi
     
-    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+    if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
         -n "$NAMESPACE" \
         --create-namespace \
@@ -2331,17 +2352,21 @@ setup_last9_monitoring() {
         # chart's CRD manifests directly with --force-conflicts so the schemas are
         # updated to the version the chart requires (e.g. PrometheusAgent.spec.tsdb,
         # ServiceMonitor trackTimestampsStaleness) without removing the CRDs.
-        helm show crds prometheus-community/kube-prometheus-stack \
-            --version "$MONITORING_VERSION" 2>/dev/null \
-            | kubectl apply --server-side --force-conflicts \
-              --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+        local crd_yaml=""
+        if crd_yaml=$(helm show crds prometheus-community/kube-prometheus-stack \
+                --version "$MONITORING_VERSION" 2>/dev/null) && [ -n "$crd_yaml" ]; then
+            echo "$crd_yaml" | kubectl apply --server-side --force-conflicts \
+                --field-manager=helm -f - 2>&1 | grep -v "^$" || true
+        else
+            log_warn "Could not fetch chart CRD manifests; skipping schema upgrade (install will use --skip-crds)"
+        fi
         skip_crds_flag="--skip-crds"
     fi
     adopt_prometheus_crds
 
     # Install/upgrade the monitoring stack
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
-    if ! helm upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
         --version "$MONITORING_VERSION" \
         -n "$NAMESPACE" \
         -f k8s-monitoring-values.yaml \
@@ -2471,7 +2496,7 @@ install_events_agent() {
 
     # Install/upgrade the events agent
     log_info "Installing/upgrading Last9 Kubernetes Events Agent..."
-    if ! helm upgrade --install last9-kube-events-agent open-telemetry/opentelemetry-collector \
+    if ! helm_upgrade_install_with_retry last9-kube-events-agent open-telemetry/opentelemetry-collector \
         --version 0.165.0 \
         -n "$NAMESPACE" \
         --create-namespace \
@@ -2912,7 +2937,7 @@ main() {
                     
                     # For individual function calls with custom values, use as-is (no token replacement)
                     log_info "Using values file as-is for individual function call"
-                    if ! helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
+                    if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
                         --create-namespace \

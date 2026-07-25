@@ -67,6 +67,7 @@ jobs:
           - { mode: logs-only,              helm: v3.14.0 }
           - { mode: monitoring-only,        helm: v3.14.0 }
           - { mode: events-only,            helm: v3.14.0 }
+          - { mode: full-install,           helm: v3.14.0 }
           - { mode: crd-conflict,           helm: v4.1.3 }
           - { mode: operator-crd-conflict,  helm: v4.1.3 }
           - { mode: context,                helm: v3.14.0 }
