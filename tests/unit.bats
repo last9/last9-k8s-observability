@@ -152,7 +152,7 @@ load_helpers() {
     printf '#!/bin/sh\nexit 0\n' > "$tmpdir/apt-get"; chmod +x "$tmpdir/apt-get"
 
     run bash -c "
-        export PATH='$tmpdir:\$PATH'
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
         source '$SCRIPT' 2>/dev/null || true
         detect_host_platform 2>/dev/null
         echo \"arch=\$HOST_ARCH pkg=\$HOST_PKG ext=\$HOST_PKG_EXT\"
@@ -196,7 +196,7 @@ load_helpers() {
     func_body=$(awk '/^detect_host_platform\(\)/,/^}/' "$SCRIPT")
 
     run bash -c "
-        export PATH='$tmpdir:\$PATH'
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
         GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
         log_info() { :; }
         log_warn() { echo \"[WARN] \$1\" >&2; }
@@ -343,7 +343,7 @@ SH
 
     func_body=$(setup_context_wrappers_func)
     run bash -c "
-        export PATH='$tmpdir:\$PATH'
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
         GREEN='\033[0;32m'; NC='\033[0m'
         log_info() { echo \"\$1\" >&2; }
         log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
@@ -373,7 +373,7 @@ SH
 
     func_body=$(setup_context_wrappers_func)
     run bash -c "
-        export PATH='$tmpdir:\$PATH'
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
         GREEN='\033[0;32m'; NC='\033[0m'
         log_info() { :; }
         log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
@@ -399,7 +399,7 @@ SH
 
     func_body=$(setup_context_wrappers_func)
     run bash -c "
-        export PATH='$tmpdir:\$PATH'
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
         GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
         log_info() { :; }
         log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
@@ -421,7 +421,13 @@ SH
 
 collector_values_helpers_func() {
     awk '/^_collector_last9_exporter_key\(\)/,/^}/' "$SCRIPT"
+    awk '/^_collector_values_has_legacy_keys\(\)/,/^}/' "$SCRIPT"
+    awk '/^_collector_values_has_kubernetes_events_preset_enabled\(\)/,/^}/' "$SCRIPT"
+    awk '/^version_lt\(\)/,/^}/' "$SCRIPT"
+    awk '/^_helm_release_exists\(\)/,/^}/' "$SCRIPT"
+    awk '/^_helm_release_chart_version\(\)/,/^}/' "$SCRIPT"
     awk '/^migrate_collector_values_for_0165\(\)/,/^}/' "$SCRIPT"
+    awk '/^prepare_collector_values_file\(\)/,/^}/' "$SCRIPT"
 }
 
 collector_tls_func() {
@@ -544,14 +550,65 @@ YAML
     run bash -c "
         cd '$tmpdir'
         COLLECTOR_VERSION='0.165.0'
+        NAMESPACE='last9'
+        log_info() { :; }
+        log_warn() { echo \"[WARN] \$1\"; }
+        log_error() { exit 1; }
+        helm() { :; }
+        $func_body
+        prepare_collector_values_file legacy-values.yaml '' 'OpenTelemetry Collector'
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kubernetesEvents.enabled: true"* ]]
+    [[ "$output" == *"Action required"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "prepare_collector_values: calls out upgrade when release already installed" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/integration/stubs/helm" "$tmpdir/helm"
+    chmod +x "$tmpdir/helm"
+    legacy_collector_values_fixture > "$tmpdir/legacy-values.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        export PATH='$tmpdir:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:$PATH'
+        export SIMULATE_EXISTING_COLLECTOR_RELEASE=1
+        export HELM_CALLS_LOG='$tmpdir/helm.log'
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        NAMESPACE='last9'
         log_info() { :; }
         log_warn() { echo \"[WARN] \$1\"; }
         log_error() { exit 1; }
         $func_body
-        migrate_collector_values_for_0165 legacy-values.yaml
+        prepare_collector_values_file legacy-values.yaml last9-opentelemetry-collector 'OpenTelemetry Collector'
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"kubernetesEvents.enabled: true"* ]]
+    [[ "$output" == *"Upgrade detected"* ]]
+    [[ "$output" == *"0.126.0"* ]]
+    [[ "$output" == *"0.165.0"* ]]
+    [[ "$output" == *"deprecated collector config keys"* ]]
+    grep -q 'otlp_grpc/last9' "$tmpdir/legacy-values.yaml"
+    rm -rf "$tmpdir"
+}
+
+@test "prepare_collector_values: fresh install skips upgrade banner" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/values.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        NAMESPACE='last9'
+        log_info() { :; }
+        log_warn() { echo \"[WARN] \$1\"; }
+        log_error() { exit 1; }
+        helm() { echo '[]'; }
+        $func_body
+        prepare_collector_values_file values.yaml last9-opentelemetry-collector 'OpenTelemetry Collector'
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Upgrade detected"* ]]
     rm -rf "$tmpdir"
 }
 

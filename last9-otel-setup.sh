@@ -211,6 +211,39 @@ _collector_last9_exporter_key() {
     fi
 }
 
+# True when a values file still uses pre-0.156 collector component names.
+_collector_values_has_legacy_keys() {
+    local file="$1"
+    grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' "$file"
+}
+
+# True when presets.kubernetesEvents.enabled is true (deprecated with chart 0.165+).
+_collector_values_has_kubernetes_events_preset_enabled() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    awk '/^  kubernetesEvents:/{f=1} f && /^    enabled: true/{found=1; exit} END{exit !found}' "$file"
+}
+
+# Compare dotted version strings (e.g. 0.126.0 < 0.165.0).
+version_lt() {
+    local a="$1" b="$2"
+    [ "$(printf '%s\n' "$a" "$b" | sort -V | head -1)" = "$a" ] && [ "$a" != "$b" ]
+}
+
+_helm_release_exists() {
+    local release="$1" ns="$2"
+    helm list -n "$ns" --filter "^${release}$" -q 2>/dev/null | grep -qx "$release"
+}
+
+# Chart version from an installed Helm release (e.g. 0.126.0), or empty when absent.
+_helm_release_chart_version() {
+    local release="$1" ns="$2"
+    helm list -n "$ns" --filter "^${release}$" -o json 2>/dev/null \
+        | tr -d '\n' \
+        | sed -n 's/.*"chart":"[^"]*-\([^"]*\)".*/\1/p' \
+        | head -1
+}
+
 # Migrate deprecated OTel collector config keys in a helm values file so chart
 # 0.165.0 / collector 0.156.0 accept custom -f overrides from pre-0.156 installs.
 # Idempotent — safe on already-migrated files (no-op).
@@ -219,7 +252,7 @@ migrate_collector_values_for_0165() {
 
     [ -f "$file" ] || return 0
 
-    if ! grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' "$file"; then
+    if ! _collector_values_has_legacy_keys "$file"; then
         return 0
     fi
 
@@ -239,12 +272,49 @@ migrate_collector_values_for_0165() {
         "$file"
     rm -f "${file}.tmp"
 
-    if grep -qE '^[[:space:]]*kubernetesEvents:[[:space:]]*$' "$file" \
-        && awk '/^  kubernetesEvents:/{f=1} f && /^    enabled: true/{found=1; exit} END{exit !found}' "$file"; then
-        log_warn "⚠ $file still has presets.kubernetesEvents.enabled: true — disable it and use an explicit k8s_objects receiver (see bundled values)."
+    log_info "✓ Migrated $file (otlp→otlp_grpc, k8sattributes→k8s_attributes, k8sobjects→k8s_objects)"
+}
+
+# Pre-upgrade sanity checks for collector chart installs. When an existing release
+# is detected, call out the upgrade path and any values issues before helm runs.
+# Optional release_name — omit on fresh installs that have no release yet.
+prepare_collector_values_file() {
+    local values_file="$1"
+    local release_name="${2:-}"
+    local component_label="${3:-OpenTelemetry Collector}"
+
+    [ -f "$values_file" ] || return 0
+
+    local current_chart=""
+    if [ -n "$release_name" ] && _helm_release_exists "$release_name" "$NAMESPACE"; then
+        current_chart=$(_helm_release_chart_version "$release_name" "$NAMESPACE")
+        log_warn "Upgrade detected: $component_label release '$release_name' is already installed."
+        if [ -n "$current_chart" ]; then
+            log_warn "  Current chart: opentelemetry-collector-$current_chart → target: $COLLECTOR_VERSION (collector image 0.156.0)."
+            if version_lt "$current_chart" "0.165.0"; then
+                log_warn "  Chart <$COLLECTOR_VERSION uses renamed collector components (otlp_grpc, k8s_attributes, k8s_objects)."
+            fi
+        else
+            log_warn "  Upgrading to opentelemetry-collector chart $COLLECTOR_VERSION (collector image 0.156.0)."
+        fi
+        log_warn "  Expect a one-time collector pod restart during the upgrade."
     fi
 
-    log_info "✓ Migrated $file (otlp→otlp_grpc, k8sattributes→k8s_attributes, k8sobjects→k8s_objects)"
+    if _collector_values_has_legacy_keys "$values_file"; then
+        log_warn "  $values_file uses deprecated collector config keys (otlp/last9, k8sattributes, and/or k8sobjects)."
+        log_warn "  These will be rewritten automatically; backup saved as ${values_file}.backup-migrate."
+    fi
+
+    if _collector_values_has_kubernetes_events_preset_enabled "$values_file"; then
+        log_warn "  $values_file has presets.kubernetesEvents.enabled: true (removed in chart $COLLECTOR_VERSION)."
+        log_warn "  Disable that preset and configure an explicit k8s_objects receiver — see bundled last9-kube-events-agent-values.yaml."
+    fi
+
+    migrate_collector_values_for_0165 "$values_file"
+
+    if _collector_values_has_kubernetes_events_preset_enabled "$values_file"; then
+        log_warn "  Action required before upgrade can succeed: disable presets.kubernetesEvents in $values_file."
+    fi
 }
 
 # Retry helm upgrade --install on transient failures (chart download 5xx, network blips).
@@ -1271,7 +1341,7 @@ setup_repository() {
     log_info "Repository setup completed!"
 
     # Upgrade custom/local values that still use pre-0.156 collector config keys.
-    migrate_collector_values_for_0165 "last9-otel-collector-values.yaml"
+    prepare_collector_values_file "last9-otel-collector-values.yaml" "" "OpenTelemetry Collector"
 
     # Update auth token and endpoint in the values file
     update_auth_token
@@ -2116,7 +2186,7 @@ install_collector() {
         log_info "Using custom values file: $values_file"
     fi
 
-    migrate_collector_values_for_0165 "$values_file"
+    prepare_collector_values_file "$values_file" "last9-opentelemetry-collector" "OpenTelemetry Collector"
     
     if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
@@ -2555,11 +2625,11 @@ install_events_agent() {
         log_error "last9-kube-events-agent-values.yaml not found in current directory"
     fi
 
-    migrate_collector_values_for_0165 "last9-kube-events-agent-values.yaml"
-
     # Update auth token and endpoint in events agent values file
     update_events_agent_auth_token
     update_events_agent_endpoint
+
+    prepare_collector_values_file "last9-kube-events-agent-values.yaml" "last9-kube-events-agent" "Kubernetes Events Agent"
 
     # Inject TLS server name override if provided (no-op when unset)
     inject_collector_tls_server_name "last9-kube-events-agent-values.yaml"
@@ -3010,7 +3080,7 @@ main() {
                     
                     # For individual function calls with custom values, use as-is (no token replacement)
                     log_info "Using values file as-is for individual function call"
-                    migrate_collector_values_for_0165 "$VALUES_FILE"
+                    prepare_collector_values_file "$VALUES_FILE" "last9-opentelemetry-collector" "OpenTelemetry Collector"
                     if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
