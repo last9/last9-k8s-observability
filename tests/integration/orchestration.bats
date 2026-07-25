@@ -163,6 +163,58 @@ run_monitoring_only() {
 }
 
 # ---------------------------------------------------------------------------
+# Custom values migration (pre-0.156 collector config keys)
+# ---------------------------------------------------------------------------
+
+@test "install_collector with legacy custom values migrates keys before helm" {
+    cat > legacy-values.yaml <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "https://example"
+  processors:
+    k8sattributes:
+      {}
+  receivers:
+    k8sobjects/topology:
+      auth_type: serviceAccount
+  service:
+    pipelines:
+      logs:
+        processors:
+          - k8sattributes
+        exporters:
+          - otlp/last9
+YAML
+    run bash "$SCRIPT" function=install_collector token=tok endpoint=https://example.com values=legacy-values.yaml
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deprecated collector config keys"* ]]
+    grep -q 'otlp_grpc/last9' legacy-values.yaml
+    ! grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' legacy-values.yaml
+    grep -q 'upgrade --install last9-opentelemetry-collector' "$HELM_CALLS_LOG"
+}
+
+@test "install_collector upgrade calls out existing release before helm" {
+    export SIMULATE_EXISTING_COLLECTOR_RELEASE=1
+    cat > legacy-values.yaml <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "https://example"
+  service:
+    pipelines:
+      logs:
+        exporters:
+          - otlp/last9
+YAML
+    run bash "$SCRIPT" function=install_collector token=tok endpoint=https://example.com values=legacy-values.yaml
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Upgrade detected"* ]]
+    [[ "$output" == *"0.126.0"* ]]
+    grep -q 'upgrade --install last9-opentelemetry-collector' "$HELM_CALLS_LOG"
+}
+
+# ---------------------------------------------------------------------------
 # Uninstall instrumentation scoping (PR #37)
 # ---------------------------------------------------------------------------
 

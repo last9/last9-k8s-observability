@@ -416,14 +416,183 @@ SH
 }
 
 # ---------------------------------------------------------------------------
-# inject_collector_tls_server_name / inject_monitoring_tls_server_name
+# migrate_collector_values_for_0165 / _collector_last9_exporter_key
 # ---------------------------------------------------------------------------
 
+collector_values_helpers_func() {
+    awk '/^_collector_last9_exporter_key\(\)/,/^}/' "$SCRIPT"
+    awk '/^migrate_collector_values_for_0165\(\)/,/^}/' "$SCRIPT"
+}
+
 collector_tls_func() {
+    collector_values_helpers_func
     awk '/^inject_collector_tls_server_name\(\)/,/^}/' "$SCRIPT"
 }
 monitoring_tls_func() {
     awk '/^inject_monitoring_tls_server_name\(\)/,/^}/' "$SCRIPT"
+}
+
+legacy_collector_values_fixture() {
+    cat <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "{{OTEL_ENDPOINT}}"
+      headers:
+        "Authorization": "{{AUTH_TOKEN}}"
+  processors:
+    k8sattributes:
+      extract_all_pod_labels: true
+  receivers:
+    k8sobjects/topology:
+      auth_type: serviceAccount
+  service:
+    pipelines:
+      logs:
+        processors:
+          - k8sattributes
+        exporters:
+          - otlp/last9
+YAML
+}
+
+@test "migrate_collector_values: renames legacy otlp, processor, and receiver keys" {
+    tmpdir=$(mktemp -d)
+    legacy_collector_values_fixture > "$tmpdir/legacy-values.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        $func_body
+        migrate_collector_values_for_0165 legacy-values.yaml
+        grep -E 'otlp_grpc/last9|k8s_attributes|k8s_objects/topology' legacy-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"otlp_grpc/last9"* ]]
+    [[ "$output" == *"k8s_attributes"* ]]
+    [[ "$output" == *"k8s_objects/topology"* ]]
+    ! grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' "$tmpdir/legacy-values.yaml"
+    rm -rf "$tmpdir"
+}
+
+@test "migrate_collector_values: no-op on already-migrated bundled values" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/values.yaml"
+    cp "$tmpdir/values.yaml" "$tmpdir/orig.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        $func_body
+        migrate_collector_values_for_0165 values.yaml
+        diff orig.yaml values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    [ ! -f "$tmpdir/values.yaml.backup-migrate" ]
+    rm -rf "$tmpdir"
+}
+
+@test "migrate_collector_values: idempotent on second run" {
+    tmpdir=$(mktemp -d)
+    legacy_collector_values_fixture > "$tmpdir/legacy-values.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        $func_body
+        migrate_collector_values_for_0165 legacy-values.yaml
+        cp legacy-values.yaml once.yaml
+        migrate_collector_values_for_0165 legacy-values.yaml
+        diff once.yaml legacy-values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "migrate_collector_values: creates backup-migrate only once" {
+    tmpdir=$(mktemp -d)
+    legacy_collector_values_fixture > "$tmpdir/legacy-values.yaml"
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        $func_body
+        migrate_collector_values_for_0165 legacy-values.yaml
+        migrate_collector_values_for_0165 legacy-values.yaml
+        ls legacy-values.yaml.backup-migrate
+    "
+    [ "$status" -eq 0 ]
+    grep -q 'otlp/last9' "$tmpdir/legacy-values.yaml.backup-migrate"
+    rm -rf "$tmpdir"
+}
+
+@test "migrate_collector_values: warns when kubernetesEvents preset still enabled" {
+    tmpdir=$(mktemp -d)
+    legacy_collector_values_fixture > "$tmpdir/legacy-values.yaml"
+    cat >> "$tmpdir/legacy-values.yaml" <<'YAML'
+presets:
+  kubernetesEvents:
+    enabled: true
+YAML
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        cd '$tmpdir'
+        COLLECTOR_VERSION='0.165.0'
+        log_info() { :; }
+        log_warn() { echo \"[WARN] \$1\"; }
+        log_error() { exit 1; }
+        $func_body
+        migrate_collector_values_for_0165 legacy-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"kubernetesEvents.enabled: true"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "collector_last9_exporter_key: detects legacy otlp/last9" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/values.yaml" <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: x
+YAML
+    func_body=$(collector_values_helpers_func)
+    run bash -c "
+        $func_body
+        _collector_last9_exporter_key '$tmpdir/values.yaml'
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = "otlp/last9" ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_collector_tls: works on legacy otlp/last9 exporter" {
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/last9-otel-collector-values.yaml" <<'YAML'
+config:
+  exporters:
+    otlp/last9:
+      endpoint: "{{OTEL_ENDPOINT}}"
+YAML
+    func_body=$(collector_tls_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        SERVER_NAME='otlp.last9.io'
+        $func_body
+        inject_collector_tls_server_name last9-otel-collector-values.yaml
+        grep 'server_name_override' last9-otel-collector-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"server_name_override: otlp.last9.io"* ]]
+    rm -rf "$tmpdir"
 }
 
 @test "inject_collector_tls: adds tls block under otlp_grpc/last9 with correct indent" {

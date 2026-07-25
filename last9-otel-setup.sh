@@ -200,6 +200,53 @@ detect_helm_schema_flag() {
     fi
 }
 
+# Return the Last9 OTLP exporter map key in a collector values file (otlp_grpc/last9
+# or legacy otlp/last9). Empty when neither is present.
+_collector_last9_exporter_key() {
+    local file="$1"
+    if grep -qE '^    otlp_grpc/last9:[[:space:]]*$' "$file"; then
+        printf '%s' 'otlp_grpc/last9'
+    elif grep -qE '^    otlp/last9:[[:space:]]*$' "$file"; then
+        printf '%s' 'otlp/last9'
+    fi
+}
+
+# Migrate deprecated OTel collector config keys in a helm values file so chart
+# 0.165.0 / collector 0.156.0 accept custom -f overrides from pre-0.156 installs.
+# Idempotent — safe on already-migrated files (no-op).
+migrate_collector_values_for_0165() {
+    local file="$1"
+
+    [ -f "$file" ] || return 0
+
+    if ! grep -qE '^[[:space:]]*otlp/last9:|^[[:space:]]*- otlp/last9$|^[[:space:]]*k8sattributes:|^[[:space:]]*- k8sattributes$|^[[:space:]]*k8sobjects(/topology)?:|^[[:space:]]*- k8sobjects$' "$file"; then
+        return 0
+    fi
+
+    log_info "Migrating deprecated collector config keys in $file for chart $COLLECTOR_VERSION..."
+
+    if [ ! -f "${file}.backup-migrate" ]; then
+        cp "$file" "${file}.backup-migrate"
+        log_info "Created backup: ${file}.backup-migrate"
+    fi
+
+    # Order matters: longest/most-specific patterns first.
+    sed -i.tmp \
+        -e 's|k8sobjects/topology|k8s_objects/topology|g' \
+        -e 's|otlp/last9|otlp_grpc/last9|g' \
+        -e 's|k8sattributes|k8s_attributes|g' \
+        -e 's|k8sobjects|k8s_objects|g' \
+        "$file"
+    rm -f "${file}.tmp"
+
+    if grep -qE '^[[:space:]]*kubernetesEvents:[[:space:]]*$' "$file" \
+        && awk '/^  kubernetesEvents:/{f=1} f && /^    enabled: true/{found=1; exit} END{exit !found}' "$file"; then
+        log_warn "⚠ $file still has presets.kubernetesEvents.enabled: true — disable it and use an explicit k8s_objects receiver (see bundled values)."
+    fi
+
+    log_info "✓ Migrated $file (otlp→otlp_grpc, k8sattributes→k8s_attributes, k8sobjects→k8s_objects)"
+}
+
 # Retry helm upgrade --install on transient failures (chart download 5xx, network blips).
 # All arguments are forwarded verbatim to `helm upgrade --install`.
 helm_upgrade_install_with_retry() {
@@ -1121,6 +1168,18 @@ setup_context_wrappers() {
 # Function to check prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
+
+    # Individual function= invocations validate their own arguments in main().
+    if [ -n "$FUNCTION_TO_EXECUTE" ]; then
+        command -v helm >/dev/null 2>&1 || log_error "helm is required but not installed. Aborting."
+        command -v kubectl >/dev/null 2>&1 || log_error "kubectl is required but not installed. Aborting."
+        if [ "$UNINSTALL_MODE" = false ]; then
+            command -v git >/dev/null 2>&1 || log_error "git is required but not installed. Aborting."
+        fi
+        kubectl cluster-info >/dev/null 2>&1 || log_error "kubectl cannot connect to cluster. Aborting."
+        log_info "Prerequisites check passed!"
+        return 0
+    fi
     
     # Skip token check for uninstall mode, logs-only mode, monitoring-only mode, and events-only mode
     # Note: operator-only mode will check for token later in its specific section
@@ -1210,6 +1269,9 @@ setup_repository() {
     done
 
     log_info "Repository setup completed!"
+
+    # Upgrade custom/local values that still use pre-0.156 collector config keys.
+    migrate_collector_values_for_0165 "last9-otel-collector-values.yaml"
 
     # Update auth token and endpoint in the values file
     update_auth_token
@@ -1351,6 +1413,13 @@ inject_collector_tls_server_name() {
         return 0
     fi
 
+    local exporter_key
+    exporter_key=$(_collector_last9_exporter_key "$file")
+    if [ -z "$exporter_key" ]; then
+        log_warn "⚠ No otlp_grpc/last9 or otlp/last9 exporter in $file, skipping TLS injection"
+        return 0
+    fi
+
     log_info "Injecting TLS server_name_override ($SERVER_NAME) into $file..."
 
     if [ ! -f "$file.backup" ]; then
@@ -1362,16 +1431,16 @@ inject_collector_tls_server_name() {
     # add server_name_override under it rather than emitting a second tls: key (which
     # would be a duplicate map key). Commented "# tls:" examples elsewhere don't match.
     local has_tls
-    has_tls=$(awk '
-        /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; next }
+    has_tls=$(awk -v key="$exporter_key" '
+        $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; next }
         in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
         in_block && /^      tls:[[:space:]]*$/ { print "yes"; exit }
     ' "$file")
 
     if [ -n "$has_tls" ]; then
-        # Insert server_name_override as a child of the existing otlp_grpc/last9 tls: block.
-        awk -v sni="$SERVER_NAME" '
-            /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; print; next }
+        # Insert server_name_override as a child of the existing Last9 exporter tls: block.
+        awk -v key="$exporter_key" -v sni="$SERVER_NAME" '
+            $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print
@@ -1381,12 +1450,12 @@ inject_collector_tls_server_name() {
             }
         ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
     else
-        # No tls block yet: anchor on the otlp_grpc/last9: exporter block (4-space key) and
+        # No tls block yet: anchor on the Last9 exporter block (4-space key) and
         # insert a fresh tls block after its 6-space endpoint: line. This avoids the
         # decoy endpoint: lines for health_check, the otlp receivers, and
         # internalTelemetryViaOTLP, which live in other blocks.
-        awk -v sni="$SERVER_NAME" '
-            /^    otlp_grpc\/last9:[[:space:]]*$/ { in_block=1; print; next }
+        awk -v key="$exporter_key" -v sni="$SERVER_NAME" '
+            $0 ~ "^    " key ":[[:space:]]*$" { in_block=1; print; next }
             in_block && /^ {0,4}[^[:space:]]/ { in_block=0 }
             {
                 print
@@ -2046,6 +2115,8 @@ install_collector() {
         values_file="$VALUES_FILE"
         log_info "Using custom values file: $values_file"
     fi
+
+    migrate_collector_values_for_0165 "$values_file"
     
     if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
@@ -2483,6 +2554,8 @@ install_events_agent() {
     if [ ! -f "last9-kube-events-agent-values.yaml" ]; then
         log_error "last9-kube-events-agent-values.yaml not found in current directory"
     fi
+
+    migrate_collector_values_for_0165 "last9-kube-events-agent-values.yaml"
 
     # Update auth token and endpoint in events agent values file
     update_events_agent_auth_token
@@ -2937,6 +3010,7 @@ main() {
                     
                     # For individual function calls with custom values, use as-is (no token replacement)
                     log_info "Using values file as-is for individual function call"
+                    migrate_collector_values_for_0165 "$VALUES_FILE"
                     if ! helm_upgrade_install_with_retry last9-opentelemetry-collector open-telemetry/opentelemetry-collector \
                         --version "$COLLECTOR_VERSION" \
                         -n "$NAMESPACE" \
