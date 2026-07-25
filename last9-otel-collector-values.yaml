@@ -200,6 +200,16 @@ config:
           statements:
             # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
             - set(attributes["service.name"], attributes["k8s.container.name"]) where attributes["service.name"] == ""
+    transform/traces/reduce_data:
+      error_mode: ignore
+      trace_statements:
+        - context: span
+          statements:
+            - set(cache["exception"], attributes)
+            - keep_matching_keys(cache["exception"], "^exception\\.")
+            - truncate_all(attributes, 400)
+            - truncate_all(resource.attributes, 1000)
+            - merge_maps(attributes, cache["exception"], "upsert")
   receivers:
     otlp:
       protocols:
@@ -272,7 +282,9 @@ config:
         receivers:
           - otlp
         processors:
+          - k8s_attributes
           - transform/traces/last9
+          - transform/traces/reduce_data
           - batch
         exporters:
           - otlp_grpc/last9
@@ -756,6 +768,5 @@ networkPolicy:
 
 # Allow containers to share processes across pod namespace
 shareProcessNamespace: false
-
 
 
