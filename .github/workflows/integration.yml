@@ -7,6 +7,16 @@ on:
       - 'tests/**'
       - '*.yaml'
       - '.github/workflows/integration.yml'
+  # push uses the workflow file at the commit SHA (unlike pull_request, which can
+  # skip runs when only the workflow file changed on the PR branch).
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - 'last9-otel-setup.sh'
+      - 'tests/**'
+      - '*.yaml'
+      - '.github/workflows/integration.yml'
   workflow_dispatch:
 
 jobs:
