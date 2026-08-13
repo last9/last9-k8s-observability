@@ -11,6 +11,27 @@ spec:
     type: parentbased_traceidratio
     argument: "1.0"
   java:
+    # Pin the Java auto-instrumentation agent explicitly.
+    #
+    # Without this, the agent version is whatever the OpenTelemetry Operator
+    # happens to default to. That default changes when OPERATOR_VERSION in
+    # last9-otel-setup.sh is bumped, and it is recorded nowhere -- so the agent
+    # version silently drifts, and pods injected at different times can run
+    # different versions.
+    #
+    # Bumping the operator is not a substitute: operator 0.156.0 still defaults
+    # autoinstrumentation-java to 2.29.0, so the operator default alone never
+    # reaches 2.30.0.
+    #
+    # 2.30.0 adds server.address / server.port to Redis client spans -- Redisson
+    # (open-telemetry/opentelemetry-java-instrumentation#19191), Lettuce (#19192)
+    # and Rediscala. Below 2.30.0 those spans carry only network.peer.address, so
+    # a Redis instance can only be identified by resolved IP rather than by its
+    # configured endpoint hostname.
+    #
+    # Other languages deliberately stay on operator defaults here; pin them the
+    # same way if a specific version is ever required.
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.30.0
     env:
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: "http://otel-collector-service.last9.svc.cluster.local:4318"
