@@ -42,22 +42,34 @@ def _inject_namespace_filter(tmpdir, include=None, exclude=None):
     shutil.copy(VALUES_FILE, values_copy)
     _resolve_endpoint_placeholder(values_copy)
 
+    build_namespace_regex_fn = subprocess.run(
+        ["awk", "/^build_namespace_regex\\(\\)/,/^}/", SETUP_SCRIPT],
+        capture_output=True, text=True
+    ).stdout
+    inject_metrics_namespace_filter_fn = subprocess.run(
+        ["awk", "/^inject_metrics_namespace_filter\\(\\)/,/^}/", SETUP_SCRIPT],
+        capture_output=True, text=True
+    ).stdout
+
     script = f"""
         cd {tmpdir}
         log_info() {{ :; }}; log_warn() {{ :; }}; log_error() {{ exit 1; }}
-        {subprocess.run(
-            ["awk", "/^build_namespace_regex\\(\\)/,/^}}/", SETUP_SCRIPT],
-            capture_output=True, text=True
-        ).stdout}
-        {subprocess.run(
-            ["awk", "/^inject_metrics_namespace_filter\\(\\)/,/^}}/", SETUP_SCRIPT],
-            capture_output=True, text=True
-        ).stdout}
+        {build_namespace_regex_fn}
+        {inject_metrics_namespace_filter_fn}
         METRICS_NAMESPACE_INCLUDE='{include or ""}'
         METRICS_NAMESPACE_EXCLUDE='{exclude or ""}'
         inject_metrics_namespace_filter
     """
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    # Write the script to a file rather than passing it as a `bash -c` argv
+    # string: some CI runners' effective argv+environ ceiling is smaller than
+    # ARG_MAX would suggest (large injected env vars count against the same
+    # limit), and this exact construction hit "OSError: [Errno 7] Argument
+    # list too long" in GitHub Actions despite the script itself being only a
+    # few KB. Running it as a file sidesteps that limit entirely.
+    script_path = os.path.join(tmpdir, "inject.sh")
+    with open(script_path, "w") as f:
+        f.write(script)
+    result = subprocess.run(["bash", script_path], capture_output=True, text=True)
     assert result.returncode == 0, f"injection failed: {result.stderr}"
     return values_copy
 
