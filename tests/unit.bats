@@ -100,7 +100,7 @@ load_helpers() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -112,7 +112,7 @@ load_helpers() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -124,7 +124,7 @@ load_helpers() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -136,7 +136,7 @@ load_helpers() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -148,7 +148,7 @@ load_helpers() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -204,8 +204,8 @@ parse_namespace_args_func() {
         echo \"EXCLUDE=\$METRICS_NAMESPACE_EXCLUDE\"
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"INCLUDE=production,prod-apps"* ]]
-    [[ "$output" == *"EXCLUDE="$'\n'* || "$output" == *"EXCLUDE="* ]]
+    echo "$output" | grep -qF "INCLUDE=production,prod-apps"
+    echo "$output" | grep -qF "EXCLUDE="
 }
 
 @test "parse_arguments: metrics-namespace-exclude sets METRICS_NAMESPACE_EXCLUDE" {
@@ -233,8 +233,8 @@ parse_namespace_args_func() {
         echo \"EXCLUDE=[\$METRICS_NAMESPACE_EXCLUDE]\"
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"INCLUDE=[]"* ]]
-    [[ "$output" == *"EXCLUDE=[]"* ]]
+    echo "$output" | grep -qF "INCLUDE=[]"
+    echo "$output" | grep -qF "EXCLUDE=[]"
 }
 
 @test "parse_arguments: invalid namespace in include list fails before Helm" {
@@ -247,7 +247,7 @@ parse_namespace_args_func() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Invalid namespace"* ]]
+    echo "$output" | grep -qF "Invalid namespace"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -261,7 +261,7 @@ parse_namespace_args_func() {
         echo SHOULD_NOT_REACH
     " 2>&1
     [ "$status" -eq 1 ]
-    [[ "$output" == *"both"* ]] || [[ "$output" == *"mutually exclusive"* ]]
+    echo "$output" | grep -qE "both|mutually exclusive"
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
@@ -1061,8 +1061,8 @@ namespace_filter_func() {
         grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *'regex: "^(production|prod-apps)?$"'* ]]
-    [[ "$output" == *"action: keep"* ]]
+    echo "$output" | grep -qF 'regex: "^(production|prod-apps)?$"'
+    echo "$output" | grep -qF "action: keep"
     rm -rf "$tmpdir"
 }
 
@@ -1080,8 +1080,8 @@ namespace_filter_func() {
         grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *'regex: "^(dev|staging)$"'* ]]
-    [[ "$output" == *"action: drop"* ]]
+    echo "$output" | grep -qF 'regex: "^(dev|staging)$"'
+    echo "$output" | grep -qF "action: drop"
     rm -rf "$tmpdir"
 }
 
