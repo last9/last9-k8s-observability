@@ -180,6 +180,92 @@ load_helpers() {
 }
 
 # ---------------------------------------------------------------------------
+# parse_arguments: metrics-namespace-include / metrics-namespace-exclude
+# ---------------------------------------------------------------------------
+
+parse_namespace_args_func() {
+    echo "
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^check_namespace_filter_mutual_exclusion\(\)/,/^}/' "$SCRIPT")
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        $(awk '/^parse_arguments\(\)/,/^}/' "$SCRIPT")
+    "
+}
+
+@test "parse_arguments: metrics-namespace-include sets METRICS_NAMESPACE_INCLUDE" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=production,prod-apps
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+        echo \"EXCLUDE=\$METRICS_NAMESPACE_EXCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCLUDE=production,prod-apps"* ]]
+    [[ "$output" == *"EXCLUDE="$'\n'* || "$output" == *"EXCLUDE="* ]]
+}
+
+@test "parse_arguments: metrics-namespace-exclude sets METRICS_NAMESPACE_EXCLUDE" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-exclude=dev,staging
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+        echo \"EXCLUDE=\$METRICS_NAMESPACE_EXCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"EXCLUDE=dev,staging"* ]]
+}
+
+@test "parse_arguments: no namespace args leaves both empty" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments monitoring-only
+        echo \"INCLUDE=[\$METRICS_NAMESPACE_INCLUDE]\"
+        echo \"EXCLUDE=[\$METRICS_NAMESPACE_EXCLUDE]\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCLUDE=[]"* ]]
+    [[ "$output" == *"EXCLUDE=[]"* ]]
+}
+
+@test "parse_arguments: invalid namespace in include list fails before Helm" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=Bad_Namespace
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "parse_arguments: both include and exclude set is a hard error" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=production metrics-namespace-exclude=dev
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"both"* ]] || [[ "$output" == *"mutually exclusive"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # log_error — must exit 1 and print [ERROR] tag
 # ---------------------------------------------------------------------------
 

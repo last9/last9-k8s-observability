@@ -59,6 +59,8 @@ USE_YQ=false
 DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 SERVER_NAME=""
+METRICS_NAMESPACE_INCLUDE=""
+METRICS_NAMESPACE_EXCLUDE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -99,6 +101,14 @@ validate_namespace_list() {
             log_error "Invalid namespace '$ns'. Kubernetes namespace names must be lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters."
         fi
     done
+}
+
+# Reject setting both include and exclude namespace filters until precedence
+# between them is deliberately defined (spec requirement — see FDE-308).
+check_namespace_filter_mutual_exclusion() {
+    if [ -n "$METRICS_NAMESPACE_INCLUDE" ] && [ -n "$METRICS_NAMESPACE_EXCLUDE" ]; then
+        log_error "metrics-namespace-include and metrics-namespace-exclude cannot both be set. Choose one."
+    fi
 }
 
 # Build an anchored regex alternation from a validated comma-separated
@@ -1161,6 +1171,14 @@ parse_arguments() {
             env=*)
                 DEPLOYMENT_ENV="${arg#*=}"
                 ;;
+            metrics-namespace-include=*)
+                METRICS_NAMESPACE_INCLUDE="${arg#*=}"
+                validate_namespace_list "$METRICS_NAMESPACE_INCLUDE"
+                ;;
+            metrics-namespace-exclude=*)
+                METRICS_NAMESPACE_EXCLUDE="${arg#*=}"
+                validate_namespace_list "$METRICS_NAMESPACE_EXCLUDE"
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -1172,6 +1190,8 @@ parse_arguments() {
                 ;;
         esac
     done
+
+    check_namespace_filter_mutual_exclusion
 }
 
 # Show examples function (for no-args case)
