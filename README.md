@@ -240,7 +240,7 @@ helm upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
 
 ### Namespace Filtering for Metrics (Optional)
 
-By default, cluster and application metrics are collected from every namespace — the same behavior as before this feature existed. Use `metrics-namespace-include=` or `metrics-namespace-exclude=` to scope collection to specific namespaces, for example to avoid ingesting metrics from `dev`/`staging` namespaces alongside `production`.
+By default, cluster metrics are collected from every namespace — the same behavior as before this feature existed. Use `metrics-namespace-include=` or `metrics-namespace-exclude=` to scope collection to specific namespaces, for example to avoid ingesting metrics from `dev`/`staging` namespaces alongside `production`.
 
 **This only affects metrics.** Logs and traces are never filtered by namespace.
 

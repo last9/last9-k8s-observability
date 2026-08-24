@@ -40,6 +40,9 @@ prometheus:
           - sourceLabels: [__name__]
             regex: "up|kube_.*|container_.*|node_.*"  # Keep relevant metrics
             action: keep
+          # NOTE: last9-otel-setup_gke_autopilot.sh's replace_placeholders() line-matches on the
+          # "action: keep" text above (12-space indent) as the anchor for injecting an optional
+          # namespace keep/drop rule. Reordering or reindenting this entry breaks that injection.
 
 # Keep kube-state-metrics
 kubeStateMetrics:
