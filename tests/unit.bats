@@ -1246,3 +1246,93 @@ load_deployment_env_helpers() {
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
     rm -rf "$tmpdir"
 }
+
+# ---------------------------------------------------------------------------
+# GKE Autopilot: namespace filtering (standalone script — no sourcing)
+# ---------------------------------------------------------------------------
+
+GKE_SCRIPT="$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup_gke_autopilot.sh"
+
+@test "gke: validate_namespace_list rejects invalid namespace" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        validate_namespace_list 'Bad_Namespace'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "gke: build_namespace_regex matches standard script's output shape" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+        build_namespace_regex 'production,prod-apps' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production|prod-apps)?$' ]
+}
+
+@test "gke: arg loop sets METRICS_NAMESPACE_INCLUDE from metrics-namespace-include=" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        for arg in metrics-namespace-include=production,prod-apps; do
+            case \$arg in
+                metrics-namespace-include=*)
+                    METRICS_NAMESPACE_INCLUDE=\"\${arg#*=}\"
+                    validate_namespace_list \"\$METRICS_NAMESPACE_INCLUDE\"
+                    ;;
+                metrics-namespace-exclude=*)
+                    METRICS_NAMESPACE_EXCLUDE=\"\${arg#*=}\"
+                    validate_namespace_list \"\$METRICS_NAMESPACE_EXCLUDE\"
+                    ;;
+            esac
+        done
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"INCLUDE=production,prod-apps"* ]]
+}
+
+@test "gke: both include and exclude set is a hard error" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        $(awk '/^check_namespace_filter_mutual_exclusion\(\)/,/^}/' "$GKE_SCRIPT")
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE='dev'
+        check_namespace_filter_mutual_exclusion
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"both"* ]] || [[ "$output" == *"mutually exclusive"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "gke: replace_placeholders injects namespace filter into temp file, leaves source untouched" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../GCP-Autopilot/k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    cp "$tmpdir/k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        kubectl() { echo 'gke-cluster'; }
+        AUTH_TOKEN='t'; OTEL_ENDPOINT='e'; MONITORING_ENDPOINT='m'
+        DEPLOYMENT_ENV=''
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+        $(awk '/^replace_placeholders\(\)/,/^}/' "$GKE_SCRIPT")
+        out=\$(replace_placeholders k8s-monitoring-values.yaml)
+        grep -n 'sourceLabels: \[namespace\]' -A2 \"\$out\"
+        diff orig.yaml k8s-monitoring-values.yaml && echo SOURCE_UNCHANGED
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'regex: "^(production)?$"'* ]]
+    [[ "$output" == *"SOURCE_UNCHANGED"* ]]
+    rm -rf "$tmpdir"
+}

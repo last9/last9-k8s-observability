@@ -33,6 +33,46 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
+# Validate a comma-separated list of Kubernetes namespace names.
+# Kept in sync with last9-otel-setup.sh's function of the same name —
+# this script does not source the main script, so the logic is duplicated
+# rather than imported.
+validate_namespace_list() {
+    local list="$1"
+    local ns
+    IFS=',' read -ra ns_array <<< "$list"
+    for ns in "${ns_array[@]}"; do
+        if [[ ! "$ns" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+            log_error "Invalid namespace '$ns'. Kubernetes namespace names must be lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters."
+            exit 1
+        fi
+    done
+}
+
+# Build an anchored regex alternation from a validated comma-separated
+# namespace list. See last9-otel-setup.sh's function of the same name for
+# the include-vs-exclude empty-carve-out rationale.
+build_namespace_regex() {
+    local list="$1"
+    local mode="$2"
+    local joined
+    joined=$(echo "$list" | tr ',' '|')
+    if [ "$mode" = "include" ]; then
+        echo "^(${joined})?\$"
+    else
+        echo "^(${joined})\$"
+    fi
+}
+
+# Reject setting both include and exclude namespace filters until
+# precedence between them is deliberately defined (spec requirement).
+check_namespace_filter_mutual_exclusion() {
+    if [ -n "$METRICS_NAMESPACE_INCLUDE" ] && [ -n "$METRICS_NAMESPACE_EXCLUDE" ]; then
+        log_error "metrics-namespace-include and metrics-namespace-exclude cannot both be set. Choose one."
+        exit 1
+    fi
+}
+
 # Configuration
 NAMESPACE="last9"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +85,8 @@ LAST9_USERNAME=""
 LAST9_PASSWORD=""
 UNINSTALL_MODE=false
 DEPLOYMENT_ENV=""
+METRICS_NAMESPACE_INCLUDE=""
+METRICS_NAMESPACE_EXCLUDE=""
 
 for arg in "$@"; do
     case $arg in
@@ -69,8 +111,18 @@ for arg in "$@"; do
         password=*)
             LAST9_PASSWORD="${arg#*=}"
             ;;
+        metrics-namespace-include=*)
+            METRICS_NAMESPACE_INCLUDE="${arg#*=}"
+            validate_namespace_list "$METRICS_NAMESPACE_INCLUDE"
+            ;;
+        metrics-namespace-exclude=*)
+            METRICS_NAMESPACE_EXCLUDE="${arg#*=}"
+            validate_namespace_list "$METRICS_NAMESPACE_EXCLUDE"
+            ;;
     esac
 done
+
+check_namespace_filter_mutual_exclusion
 
 # Handle uninstall mode
 if [ "$UNINSTALL_MODE" = true ]; then
@@ -211,6 +263,35 @@ replace_placeholders() {
             -e "s|^\([[:space:]]*\)- set(${ottl_target}, \"[^\"]*\")|\1- set(${ottl_target}, \"${escaped_env}\")|" \
             -e "s|^\([[:space:]]*\)# @DEPLOYMENT_ENVIRONMENT@.*|\1- set(${ottl_target}, \"${escaped_env}\")|" \
             "$temp_file"
+    fi
+
+    # Inject namespace include/exclude filter if provided (no-op when unset).
+    # Only applies to k8s-monitoring-values.yaml (metrics path) — logs/traces
+    # values files never reach this branch. Anchored on the sole existing
+    # writeRelabelConfigs entry in this GKE Autopilot values file, which ends
+    # "action: keep" (unlike the main script's k8s-monitoring-values.yaml,
+    # which has a trailing "action: drop" entry to anchor on instead), so the
+    # namespace rule is appended right after it.
+    if [[ "$file" == *k8s-monitoring-values.yaml ]] && { [ -n "$METRICS_NAMESPACE_INCLUDE" ] || [ -n "$METRICS_NAMESPACE_EXCLUDE" ]; }; then
+        local ns_regex ns_action
+        if [ -n "$METRICS_NAMESPACE_INCLUDE" ]; then
+            ns_regex=$(build_namespace_regex "$METRICS_NAMESPACE_INCLUDE" include)
+            ns_action="keep"
+        else
+            ns_regex=$(build_namespace_regex "$METRICS_NAMESPACE_EXCLUDE" exclude)
+            ns_action="drop"
+        fi
+        awk -v regex="$ns_regex" -v action="$ns_action" '
+            {
+                print
+                if ($0 ~ /^            action: keep$/ && !injected) {
+                    print "          - sourceLabels: [namespace]"
+                    print "            regex: \"" regex "\""
+                    print "            action: " action
+                    injected = 1
+                }
+            }
+        ' "$temp_file" > "${temp_file}.ns" && mv "${temp_file}.ns" "$temp_file"
     fi
 
     # Remove backup files
