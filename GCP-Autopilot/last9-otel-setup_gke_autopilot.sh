@@ -12,6 +12,11 @@
 #
 # Example:
 #   ./install-autopilot.sh endpoint="https://otlp-aps1.last9.io:443" token="Basic xxx" monitoring-endpoint="https://app-tsdb.last9.io/v1/metrics/xxx/sender/last9/write" username="xxx" password="xxx"
+#
+# Optional namespace filtering for metrics (mutually exclusive; comma-separated):
+#   metrics-namespace-include=NS1,NS2   Only keep cluster/node metrics for these namespaces
+#   metrics-namespace-exclude=NS1,NS2   Drop cluster/node metrics for these namespaces
+#   (namespace-less cluster/node-level metrics are always preserved either way)
 
 set -e
 
@@ -40,6 +45,16 @@ log_warn() {
 validate_namespace_list() {
     local list="$1"
     local ns
+    if [ -z "$list" ] || [ "${list#,}" != "$list" ] || [ "${list%,}" != "$list" ]; then
+        log_error "Invalid namespace list '$list': must not be empty and must not have a leading or trailing comma."
+        exit 1
+    fi
+    case "$list" in
+        *$'\n'*)
+            log_error "Invalid namespace list '$list': must not contain a newline."
+            exit 1
+            ;;
+    esac
     IFS=',' read -ra ns_array <<< "$list"
     for ns in "${ns_array[@]}"; do
         if [[ ! "$ns" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
@@ -292,6 +307,10 @@ replace_placeholders() {
                 }
             }
         ' "$temp_file" > "${temp_file}.ns" && mv "${temp_file}.ns" "$temp_file"
+
+        if ! grep -q '^          - sourceLabels: \[namespace\]$' "$temp_file"; then
+            log_warn "⚠ Could not verify namespace filter injection in $temp_file — anchor line may have drifted; install is proceeding WITHOUT namespace filtering applied."
+        fi
     fi
 
     # Remove backup files

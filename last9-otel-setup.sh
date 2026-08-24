@@ -95,6 +95,14 @@ escape_for_sed() {
 validate_namespace_list() {
     local list="$1"
     local ns
+    if [ -z "$list" ] || [ "${list#,}" != "$list" ] || [ "${list%,}" != "$list" ]; then
+        log_error "Invalid namespace list '$list': must not be empty and must not have a leading or trailing comma."
+    fi
+    case "$list" in
+        *$'\n'*)
+            log_error "Invalid namespace list '$list': must not contain a newline."
+            ;;
+    esac
     IFS=',' read -ra ns_array <<< "$list"
     for ns in "${ns_array[@]}"; do
         if [[ ! "$ns" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
@@ -1248,6 +1256,12 @@ show_help() {
     echo "                           Allows running components on tainted nodes (e.g., monitoring nodes, control-plane)"
     echo "                           See examples/ directory for sample configurations"
     echo ""
+    echo "  metrics-namespace-include=NS1,NS2  Only keep cluster/node metrics for these namespaces (comma-separated)"
+    echo "                           Namespace-less metrics (cluster/node-level) are always preserved"
+    echo ""
+    echo "  metrics-namespace-exclude=NS1,NS2  Drop cluster/node metrics for these namespaces (comma-separated)"
+    echo "                           Cannot be combined with metrics-namespace-include"
+    echo ""
     echo "Examples with Environment and Cluster Override:"
     echo "  # Set environment to production with cluster name"
     echo "  $0 token=\"xxx\" endpoint=\"xxx\" env=production cluster=prod-us-east-1"
@@ -1690,8 +1704,10 @@ inject_metrics_namespace_filter() {
     # Append the new rule right after the existing __name__ drop rule, which
     # is always the last entry in writeRelabelConfigs today (see
     # k8s-monitoring-values.yaml). Matched on its distinctive "action: drop"
-    # line at 12-space indent to stay anchored if the keep/drop pair is
-    # ever reordered.
+    # line at 12-space indent — this anchor works only because "action: drop"
+    # is currently the LAST writeRelabelConfigs entry; if that ordering ever
+    # changes, this injection breaks silently unless the verification below
+    # catches it.
     awk -v regex="$regex" -v action="$action" '
         {
             print
