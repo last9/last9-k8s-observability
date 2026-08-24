@@ -1280,22 +1280,12 @@ GKE_SCRIPT="$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup_gke_autopilot.s
         $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
         METRICS_NAMESPACE_INCLUDE=''
         METRICS_NAMESPACE_EXCLUDE=''
-        for arg in metrics-namespace-include=production,prod-apps; do
-            case \$arg in
-                metrics-namespace-include=*)
-                    METRICS_NAMESPACE_INCLUDE=\"\${arg#*=}\"
-                    validate_namespace_list \"\$METRICS_NAMESPACE_INCLUDE\"
-                    ;;
-                metrics-namespace-exclude=*)
-                    METRICS_NAMESPACE_EXCLUDE=\"\${arg#*=}\"
-                    validate_namespace_list \"\$METRICS_NAMESPACE_EXCLUDE\"
-                    ;;
-            esac
-        done
+        set -- metrics-namespace-include=production,prod-apps
+        $(awk '/^for arg in "\$@"; do/,/^done$/' "$GKE_SCRIPT")
         echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *"INCLUDE=production,prod-apps"* ]]
+    echo "$output" | grep -qF "INCLUDE=production,prod-apps"
 }
 
 @test "gke: both include and exclude set is a hard error" {
@@ -1332,7 +1322,7 @@ GKE_SCRIPT="$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup_gke_autopilot.s
         diff orig.yaml k8s-monitoring-values.yaml && echo SOURCE_UNCHANGED
     "
     [ "$status" -eq 0 ]
-    [[ "$output" == *'regex: "^(production)?$"'* ]]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
     [[ "$output" == *"SOURCE_UNCHANGED"* ]]
     rm -rf "$tmpdir"
 }
