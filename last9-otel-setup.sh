@@ -84,6 +84,41 @@ escape_for_sed() {
     printf '%s\n' "$1" | sed 's:[[\.*^$()+?{|/]:\\&:g'
 }
 
+# Validate a comma-separated list of Kubernetes namespace names.
+# Kubernetes namespace names must be valid RFC 1123 DNS labels: lowercase
+# alphanumeric or '-', must start and end with an alphanumeric character,
+# max 63 characters. Exits via log_error on the first invalid entry — this
+# guards the regex/YAML interpolation sinks in build_namespace_regex and
+# inject_metrics_namespace_filter, not just cosmetic validation.
+validate_namespace_list() {
+    local list="$1"
+    local ns
+    IFS=',' read -ra ns_array <<< "$list"
+    for ns in "${ns_array[@]}"; do
+        if [[ ! "$ns" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+            log_error "Invalid namespace '$ns'. Kubernetes namespace names must be lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters."
+        fi
+    done
+}
+
+# Build an anchored regex alternation from a validated comma-separated
+# namespace list. mode=include adds a "(...)?\$" optional-empty group so
+# namespace-less cluster/node metrics (no `namespace` label) still match
+# and survive a `keep` rule; mode=exclude has no such carve-out since it
+# is used as the pattern for a `drop` rule, which must NOT match an empty
+# label (dropping node/cluster metrics would violate the spec).
+build_namespace_regex() {
+    local list="$1"
+    local mode="$2"
+    local joined
+    joined=$(echo "$list" | tr ',' '|')
+    if [ "$mode" = "include" ]; then
+        echo "^(${joined})?\$"
+    else
+        echo "^(${joined})\$"
+    fi
+}
+
 # Activate or update deployment.environment in an OTTL values YAML file.
 # Replaces @DEPLOYMENT_ENVIRONMENT@ placeholders and updates existing OTTL set
 # lines so re-running with a different env= is idempotent.

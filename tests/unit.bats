@@ -67,6 +67,119 @@ load_helpers() {
 }
 
 # ---------------------------------------------------------------------------
+# validate_namespace_list / build_namespace_regex
+# ---------------------------------------------------------------------------
+
+@test "validate_namespace_list: accepts a valid single namespace" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production'
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "validate_namespace_list: accepts a valid comma-separated list" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production,prod-apps,kube-system'
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with uppercase letters" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'Production'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with an underscore" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'prod_apps'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry starting with a hyphen" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list '-production'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry over 63 characters" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list \"\$(printf 'a%.0s' {1..64})\"
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with a shell metacharacter" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production;rm -rf /'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "build_namespace_regex: include mode wraps list with optional-empty anchor" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'production,prod-apps' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production|prod-apps)?$' ]
+}
+
+@test "build_namespace_regex: exclude mode has no optional-empty anchor" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'dev,staging' exclude
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(dev|staging)$' ]
+}
+
+@test "build_namespace_regex: single-entry list has no stray pipe" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'production' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production)?$' ]
+}
+
+# ---------------------------------------------------------------------------
 # log_error — must exit 1 and print [ERROR] tag
 # ---------------------------------------------------------------------------
 
