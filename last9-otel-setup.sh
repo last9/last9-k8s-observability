@@ -1650,6 +1650,69 @@ inject_monitoring_tls_server_name() {
     fi
 }
 
+# Inject a namespace-scoped keep/drop relabel rule into the Prometheus
+# remoteWrite.writeRelabelConfigs list of k8s-monitoring-values.yaml.
+# No-op when neither METRICS_NAMESPACE_INCLUDE nor METRICS_NAMESPACE_EXCLUDE
+# is set — the default collect-all behavior is unchanged and the file is
+# byte-identical to before this call. Idempotent on re-run (verifies via
+# grep before deciding whether to inject again).
+inject_metrics_namespace_filter() {
+    local file="k8s-monitoring-values.yaml"
+
+    [ -z "$METRICS_NAMESPACE_INCLUDE" ] && [ -z "$METRICS_NAMESPACE_EXCLUDE" ] && return 0
+
+    if [ ! -f "$file" ]; then
+        log_warn "⚠ $file not found, skipping namespace filter injection"
+        return 0
+    fi
+
+    if grep -q '^          - sourceLabels: \[namespace\]$' "$file"; then
+        log_info "Namespace filter already present in $file, skipping"
+        return 0
+    fi
+
+    local regex action
+    if [ -n "$METRICS_NAMESPACE_INCLUDE" ]; then
+        regex=$(build_namespace_regex "$METRICS_NAMESPACE_INCLUDE" include)
+        action="keep"
+        log_info "Injecting namespace include filter ($METRICS_NAMESPACE_INCLUDE) into $file..."
+    else
+        regex=$(build_namespace_regex "$METRICS_NAMESPACE_EXCLUDE" exclude)
+        action="drop"
+        log_info "Injecting namespace exclude filter ($METRICS_NAMESPACE_EXCLUDE) into $file..."
+    fi
+
+    if [ ! -f "$file.backup-namespace-filter" ]; then
+        cp "$file" "$file.backup-namespace-filter"
+        log_info "Created backup: $file.backup-namespace-filter"
+    fi
+
+    # Append the new rule right after the existing __name__ drop rule, which
+    # is always the last entry in writeRelabelConfigs today (see
+    # k8s-monitoring-values.yaml). Matched on its distinctive "action: drop"
+    # line at 12-space indent to stay anchored if the keep/drop pair is
+    # ever reordered.
+    awk -v regex="$regex" -v action="$action" '
+        {
+            print
+            if ($0 ~ /^            action: drop$/ && !injected) {
+                print "          - sourceLabels: [namespace]"
+                print "            regex: \"" regex "\""
+                print "            action: " action
+                injected = 1
+            }
+        }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    if grep -q '^          - sourceLabels: \[namespace\]$' "$file"; then
+        log_info "✓ Namespace filter injected into $file"
+    else
+        log_warn "⚠ Could not verify namespace filter injection in $file, restoring from backup."
+        [ -f "$file.backup-namespace-filter" ] && cp "$file.backup-namespace-filter" "$file"
+        rm -f "$file.tmp"
+    fi
+}
+
 # Interactively ask for the deployment environment when run as a dev-tool CLI.
 # Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
 # stays unset there. An explicit env= argument always wins and suppresses the prompt.
@@ -2507,6 +2570,9 @@ setup_last9_monitoring() {
 
     # Inject TLS server name override if provided (no-op when unset)
     inject_monitoring_tls_server_name
+
+    # Inject namespace include/exclude filter if provided (no-op when unset)
+    inject_metrics_namespace_filter
 
     # Load tolerations if provided (needed for kubectl patching later)
     # NOTE: We skip apply_tolerations_to_monitoring_values() to avoid yq lexer issues

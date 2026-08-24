@@ -1018,6 +1018,128 @@ YAML
 }
 
 # ---------------------------------------------------------------------------
+# inject_metrics_namespace_filter
+# ---------------------------------------------------------------------------
+
+namespace_filter_func() {
+    echo "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^inject_metrics_namespace_filter\(\)/,/^}/' "$SCRIPT")
+    "
+}
+
+@test "inject_metrics_namespace_filter: no-op and byte-identical when both unset" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    cp "$tmpdir/orig.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        diff orig.yaml k8s-monitoring-values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: include list renders keep rule with empty-carve-out" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production,prod-apps'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'regex: "^(production|prod-apps)?$"'* ]]
+    [[ "$output" == *"action: keep"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: exclude list renders drop rule without carve-out" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE='dev,staging'
+        $func_body
+        inject_metrics_namespace_filter
+        grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'regex: "^(dev|staging)$"'* ]]
+    [[ "$output" == *"action: drop"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: existing metric-name keep/drop rules are untouched" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[__name__\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tail -1)" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: idempotent on re-run (single namespace rule)" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tail -1)" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: creates a distinct backup file" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        ls k8s-monitoring-values.yaml.backup-namespace-filter
+    "
+    [ "$status" -eq 0 ]
+    rm -rf "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
 # update_deployment_environment / activate_deployment_environment_in_values
 # ---------------------------------------------------------------------------
 
