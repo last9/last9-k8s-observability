@@ -238,6 +238,50 @@ helm upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
   -n last9 -f monitoring-values.yaml --reuse-values=false
 ```
 
+### Namespace Filtering for Metrics (Optional)
+
+By default, cluster and application metrics are collected from every namespace — the same behavior as before this feature existed. Use `metrics-namespace-include=` or `metrics-namespace-exclude=` to scope collection to specific namespaces, for example to avoid ingesting metrics from `dev`/`staging` namespaces alongside `production`.
+
+**This only affects metrics.** Logs and traces are never filtered by namespace.
+
+```bash
+# Collect metrics only from production and prod-apps
+./last9-otel-setup.sh \
+  monitoring-only \
+  monitoring-endpoint="your-metrics-endpoint" \
+  username="your-username" \
+  password="your-password" \
+  metrics-namespace-include=production,prod-apps
+```
+
+```bash
+# Collect metrics from every namespace except dev and staging
+./last9-otel-setup.sh \
+  monitoring-only \
+  monitoring-endpoint="your-metrics-endpoint" \
+  username="your-username" \
+  password="your-password" \
+  metrics-namespace-exclude=dev,staging
+```
+
+Setting both `metrics-namespace-include=` and `metrics-namespace-exclude=` is a hard error — the script exits before making any changes to your cluster. Choose one.
+
+Namespace values must be valid Kubernetes namespace names (lowercase alphanumeric and `-`, must start and end with an alphanumeric character, max 63 characters).
+
+**Namespace-less metrics are always preserved.** Node and cluster-wide metrics (e.g. `node_cpu_seconds_total`, `kube_deployment_status_replicas_ready`) don't carry a `namespace` label. An include filter is rendered with an "or empty" carve-out so these are never accidentally dropped:
+
+```yaml
+- sourceLabels: [namespace]
+  regex: "^(production|prod-apps)?$"
+  action: keep
+```
+
+An exclude filter needs no such carve-out — a `drop` rule only removes series whose `namespace` label matches the listed values, so an empty-namespace series is never affected.
+
+When neither argument is provided, `k8s-monitoring-values.yaml` is unchanged and every namespace is collected, exactly as before.
+
+For the optional application-metrics overlay (`last9-otel-collector-metrics-values.yaml`), namespace filtering is documented as commented example blocks in the file itself — see the comments next to the `kubernetes-pods`/`kubernetes-services` scrape jobs (Prometheus service-discovery path) and the `filter/namespace` processor example (OTLP path). That file is a manual `helm --values` overlay you edit directly; it is never modified by the installer script.
+
 ## Configuration Files
 
 | File | Description |
@@ -314,6 +358,8 @@ The script automatically sets up instrumentation for:
 The OpenTelemetry Collector can automatically discover and scrape application metrics using Kubernetes service discovery with Prometheus-compatible scraping.
 
 **Note:** This is an optional feature. Use `last9-otel-collector-metrics-values.yaml` to enable metrics scraping.
+
+To restrict this to selected namespaces, see the commented namespace filter examples inside `last9-otel-collector-metrics-values.yaml`, and [Namespace Filtering for Metrics](#namespace-filtering-for-metrics-optional) for the equivalent cluster-metrics filter.
 
 ### Enable Metrics Scraping
 
