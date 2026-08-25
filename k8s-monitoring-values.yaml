@@ -126,6 +126,10 @@ prometheus:
           - sourceLabels: [__name__]
             regex: "container_(memory_failures_total|blkio_device_usage_total|last_seen|memory_failcnt|sockets|memory_kernel_usage|memory_cache)"
             action: drop
+          # NOTE: last9-otel-setup.sh's inject_metrics_namespace_filter() appends an optional
+          # namespace keep/drop rule at the end of this writeRelabelConfigs list. It finds the
+          # end structurally (by indentation), not by matching this entry's text, so reordering
+          # or adding/removing entries here is safe.
 
 # Keep kube-state-metrics
 kubeStateMetrics:

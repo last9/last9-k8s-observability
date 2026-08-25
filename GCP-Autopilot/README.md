@@ -68,6 +68,24 @@ to all signals:
 Omit `env=` on an interactive terminal and the script prompts for the environment
 (leave blank to skip). Run non-interactively (curl | bash, CI) and it stays unset — no prompt.
 
+### Namespace Filtering for Metrics (optional)
+
+By default, cluster metrics are collected from every namespace. Pass `metrics-namespace-include=` or
+`metrics-namespace-exclude=` (comma-separated, mutually exclusive) to scope collection to specific
+namespaces:
+
+```bash
+./last9-otel-setup_gke_autopilot.sh \
+  endpoint="..." token="..." monitoring-endpoint="..." \
+  username="..." password="..." \
+  metrics-namespace-include="production,prod-apps"
+```
+
+Node and cluster-wide metrics (no `namespace` label) are always preserved regardless of which
+filter is set. Setting both `metrics-namespace-include=` and `metrics-namespace-exclude=` is a
+hard error. Namespace values must be valid Kubernetes namespace names (lowercase alphanumeric and
+`-`, must start and end with an alphanumeric character, max 63 characters).
+
 ### Uninstallation
 
 ```bash

@@ -110,6 +110,22 @@ config:
                 action: replace
                 target_label: app
 
+              # Optional: restrict scraping to selected namespaces.
+              # Uncomment ONE of the two blocks below (not both) and fill in your
+              # namespace list. Mirrors the cluster-metrics namespace filter the
+              # installer can inject into k8s-monitoring-values.yaml via
+              # metrics-namespace-include=/metrics-namespace-exclude=.
+              #
+              # Include only these namespaces (drop everything else):
+              # - source_labels: [__meta_kubernetes_namespace]
+              #   regex: production|prod-apps
+              #   action: keep
+              #
+              # Exclude these namespaces (keep everything else):
+              # - source_labels: [__meta_kubernetes_namespace]
+              #   regex: dev|staging
+              #   action: drop
+
           # Application metrics via service annotations (standard Prometheus annotations)
           - job_name: 'kubernetes-services'
             scrape_interval: 30s
@@ -145,6 +161,42 @@ config:
                 action: replace
                 target_label: namespace
 
+              # Optional: restrict scraping to selected namespaces — same
+              # pattern as the kubernetes-pods job above. Uncomment ONE block:
+              #
+              # - source_labels: [__meta_kubernetes_namespace]
+              #   regex: production|prod-apps
+              #   action: keep
+              #
+              # - source_labels: [__meta_kubernetes_namespace]
+              #   regex: dev|staging
+              #   action: drop
+
+  # Optional: restrict OTLP-sourced metrics (from application SDKs, not the
+  # Prometheus receiver above) to selected namespaces. Requires
+  # k8sattributes to run first so k8s.namespace.name is already set as a
+  # resource attribute — keep this processor AFTER k8sattributes in the
+  # pipeline list below. Uncomment ONE block below (this adds a
+  # "processors:" section merged with the one in the base values file) and
+  # add "filter/namespace" to the metrics pipeline's processors list (after
+  # k8sattributes, before batch).
+  #
+  # Include only these namespaces:
+  # processors:
+  #   filter/namespace:
+  #     error_mode: ignore
+  #     metrics:
+  #       datapoint:
+  #         - 'not IsMatch(resource.attributes["k8s.namespace.name"], "^(production|prod-apps)?$")'
+  #
+  # Exclude these namespaces:
+  # processors:
+  #   filter/namespace:
+  #     error_mode: ignore
+  #     metrics:
+  #       datapoint:
+  #         - 'IsMatch(resource.attributes["k8s.namespace.name"], "^(dev|staging)$")'
+
   service:
     extensions:
       - health_check
@@ -155,6 +207,8 @@ config:
           - otlp
           - prometheus
         processors:
+          # If you uncommented filter/namespace above, add it here, after
+          # k8sattributes and before batch: [k8sattributes, filter/namespace, batch]
           - k8sattributes
           - batch
         exporters:

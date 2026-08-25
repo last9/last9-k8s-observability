@@ -59,6 +59,8 @@ USE_YQ=false
 DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 SERVER_NAME=""
+METRICS_NAMESPACE_INCLUDE=""
+METRICS_NAMESPACE_EXCLUDE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -82,6 +84,57 @@ log_error() {
 # Helper function to escape special characters for sed
 escape_for_sed() {
     printf '%s\n' "$1" | sed 's:[[\.*^$()+?{|/]:\\&:g'
+}
+
+# Validate a comma-separated list of Kubernetes namespace names.
+# Kubernetes namespace names must be valid RFC 1123 DNS labels: lowercase
+# alphanumeric or '-', must start and end with an alphanumeric character,
+# max 63 characters. Exits via log_error on the first invalid entry — this
+# guards the regex/YAML interpolation sinks in build_namespace_regex and
+# inject_metrics_namespace_filter, not just cosmetic validation.
+validate_namespace_list() {
+    local list="$1"
+    local ns
+    if [ -z "$list" ] || [ "${list#,}" != "$list" ] || [ "${list%,}" != "$list" ]; then
+        log_error "Invalid namespace list '$list': must not be empty and must not have a leading or trailing comma."
+    fi
+    case "$list" in
+        *$'\n'*)
+            log_error "Invalid namespace list '$list': must not contain a newline."
+            ;;
+    esac
+    IFS=',' read -ra ns_array <<< "$list"
+    for ns in "${ns_array[@]}"; do
+        if [[ ! "$ns" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+            log_error "Invalid namespace '$ns'. Kubernetes namespace names must be lowercase alphanumeric characters or '-', start and end with an alphanumeric character, and be at most 63 characters."
+        fi
+    done
+}
+
+# Reject setting both include and exclude namespace filters until precedence
+# between them is deliberately defined (spec requirement — see FDE-308).
+check_namespace_filter_mutual_exclusion() {
+    if [ -n "$METRICS_NAMESPACE_INCLUDE" ] && [ -n "$METRICS_NAMESPACE_EXCLUDE" ]; then
+        log_error "metrics-namespace-include and metrics-namespace-exclude cannot both be set. Choose one."
+    fi
+}
+
+# Build an anchored regex alternation from a validated comma-separated
+# namespace list. mode=include adds a "(...)?\$" optional-empty group so
+# namespace-less cluster/node metrics (no `namespace` label) still match
+# and survive a `keep` rule; mode=exclude has no such carve-out since it
+# is used as the pattern for a `drop` rule, which must NOT match an empty
+# label (dropping node/cluster metrics would violate the spec).
+build_namespace_regex() {
+    local list="$1"
+    local mode="$2"
+    local joined
+    joined=$(echo "$list" | tr ',' '|')
+    if [ "$mode" = "include" ]; then
+        echo "^(${joined})?\$"
+    else
+        echo "^(${joined})\$"
+    fi
 }
 
 # Activate or update deployment.environment in an OTTL values YAML file.
@@ -1126,6 +1179,14 @@ parse_arguments() {
             env=*)
                 DEPLOYMENT_ENV="${arg#*=}"
                 ;;
+            metrics-namespace-include=*)
+                METRICS_NAMESPACE_INCLUDE="${arg#*=}"
+                validate_namespace_list "$METRICS_NAMESPACE_INCLUDE"
+                ;;
+            metrics-namespace-exclude=*)
+                METRICS_NAMESPACE_EXCLUDE="${arg#*=}"
+                validate_namespace_list "$METRICS_NAMESPACE_EXCLUDE"
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -1137,6 +1198,8 @@ parse_arguments() {
                 ;;
         esac
     done
+
+    check_namespace_filter_mutual_exclusion
 }
 
 # Show examples function (for no-args case)
@@ -1192,6 +1255,12 @@ show_help() {
     echo "  tolerations-file=FILE    Apply Kubernetes tolerations and nodeSelector from YAML file"
     echo "                           Allows running components on tainted nodes (e.g., monitoring nodes, control-plane)"
     echo "                           See examples/ directory for sample configurations"
+    echo ""
+    echo "  metrics-namespace-include=NS1,NS2  Only keep cluster/node metrics for these namespaces (comma-separated)"
+    echo "                           Namespace-less metrics (cluster/node-level) are always preserved"
+    echo ""
+    echo "  metrics-namespace-exclude=NS1,NS2  Drop cluster/node metrics for these namespaces (comma-separated)"
+    echo "                           Cannot be combined with metrics-namespace-include"
     echo ""
     echo "Examples with Environment and Cluster Override:"
     echo "  # Set environment to production with cluster name"
@@ -1591,6 +1660,87 @@ inject_monitoring_tls_server_name() {
     else
         log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
         [ -f "$file.backup" ] && cp "$file.backup" "$file"
+        rm -f "$file.tmp"
+    fi
+}
+
+# Inject a namespace-scoped keep/drop relabel rule into the Prometheus
+# remoteWrite.writeRelabelConfigs list of k8s-monitoring-values.yaml.
+# No-op when neither METRICS_NAMESPACE_INCLUDE nor METRICS_NAMESPACE_EXCLUDE
+# is set — the default collect-all behavior is unchanged and the file is
+# byte-identical to before this call. Idempotent on re-run (verifies via
+# grep before deciding whether to inject again).
+inject_metrics_namespace_filter() {
+    local file="k8s-monitoring-values.yaml"
+
+    [ -z "$METRICS_NAMESPACE_INCLUDE" ] && [ -z "$METRICS_NAMESPACE_EXCLUDE" ] && return 0
+
+    if [ ! -f "$file" ]; then
+        log_warn "⚠ $file not found, skipping namespace filter injection"
+        return 0
+    fi
+
+    if grep -q '^          - sourceLabels: \[namespace\]$' "$file"; then
+        log_info "Namespace filter already present in $file, skipping"
+        return 0
+    fi
+
+    local regex action
+    if [ -n "$METRICS_NAMESPACE_INCLUDE" ]; then
+        regex=$(build_namespace_regex "$METRICS_NAMESPACE_INCLUDE" include)
+        action="keep"
+        log_info "Injecting namespace include filter ($METRICS_NAMESPACE_INCLUDE) into $file..."
+    else
+        regex=$(build_namespace_regex "$METRICS_NAMESPACE_EXCLUDE" exclude)
+        action="drop"
+        log_info "Injecting namespace exclude filter ($METRICS_NAMESPACE_EXCLUDE) into $file..."
+    fi
+
+    if [ ! -f "$file.backup-namespace-filter" ]; then
+        cp "$file" "$file.backup-namespace-filter"
+        log_info "Created backup: $file.backup-namespace-filter"
+    fi
+
+    # Append the new rule at the end of the writeRelabelConfigs list, found
+    # structurally: track lines indented deeper than the "writeRelabelConfigs:"
+    # key (10+ spaces) or blank, and inject after the last such line. This
+    # is robust to reordering, added/removed entries, or reindenting within
+    # the block — unlike anchoring on a specific entry's "action: <value>"
+    # text, it doesn't depend on which entry happens to be last.
+    awk -v regex="$regex" -v action="$action" '
+        BEGIN { in_block = 0; last_block_line = 0 }
+        {
+            lines[NR] = $0
+            if ($0 ~ /^        writeRelabelConfigs:$/) {
+                in_block = 1
+                last_block_line = NR
+                next
+            }
+            if (in_block) {
+                if ($0 ~ /^          / || $0 ~ /^$/) {
+                    if ($0 !~ /^$/) last_block_line = NR
+                } else {
+                    in_block = 0
+                }
+            }
+        }
+        END {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == last_block_line) {
+                    print "          - sourceLabels: [namespace]"
+                    print "            regex: \"" regex "\""
+                    print "            action: " action
+                }
+            }
+        }
+    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+
+    if grep -q '^          - sourceLabels: \[namespace\]$' "$file"; then
+        log_info "✓ Namespace filter injected into $file"
+    else
+        log_warn "⚠ Could not verify namespace filter injection in $file, restoring from backup."
+        [ -f "$file.backup-namespace-filter" ] && cp "$file.backup-namespace-filter" "$file"
         rm -f "$file.tmp"
     fi
 }
@@ -2452,6 +2602,9 @@ setup_last9_monitoring() {
 
     # Inject TLS server name override if provided (no-op when unset)
     inject_monitoring_tls_server_name
+
+    # Inject namespace include/exclude filter if provided (no-op when unset)
+    inject_metrics_namespace_filter
 
     # Load tolerations if provided (needed for kubectl patching later)
     # NOTE: We skip apply_tolerations_to_monitoring_values() to avoid yq lexer issues

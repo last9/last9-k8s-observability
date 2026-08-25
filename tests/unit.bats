@@ -67,6 +67,205 @@ load_helpers() {
 }
 
 # ---------------------------------------------------------------------------
+# validate_namespace_list / build_namespace_regex
+# ---------------------------------------------------------------------------
+
+@test "validate_namespace_list: accepts a valid single namespace" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production'
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "validate_namespace_list: accepts a valid comma-separated list" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production,prod-apps,kube-system'
+        echo OK
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with uppercase letters" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'Production'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with an underscore" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'prod_apps'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry starting with a hyphen" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list '-production'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry over 63 characters" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list \"\$(printf 'a%.0s' {1..64})\"
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "validate_namespace_list: rejects an entry with a shell metacharacter" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        validate_namespace_list 'production;rm -rf /'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "build_namespace_regex: include mode wraps list with optional-empty anchor" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'production,prod-apps' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production|prod-apps)?$' ]
+}
+
+@test "build_namespace_regex: exclude mode has no optional-empty anchor" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'dev,staging' exclude
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(dev|staging)$' ]
+}
+
+@test "build_namespace_regex: single-entry list has no stray pipe" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        build_namespace_regex 'production' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production)?$' ]
+}
+
+# ---------------------------------------------------------------------------
+# parse_arguments: metrics-namespace-include / metrics-namespace-exclude
+# ---------------------------------------------------------------------------
+
+parse_namespace_args_func() {
+    echo "
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^check_namespace_filter_mutual_exclusion\(\)/,/^}/' "$SCRIPT")
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        $(awk '/^parse_arguments\(\)/,/^}/' "$SCRIPT")
+    "
+}
+
+@test "parse_arguments: metrics-namespace-include sets METRICS_NAMESPACE_INCLUDE" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=production,prod-apps
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+        echo \"EXCLUDE=\$METRICS_NAMESPACE_EXCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "INCLUDE=production,prod-apps"
+    echo "$output" | grep -qF "EXCLUDE="
+}
+
+@test "parse_arguments: metrics-namespace-exclude sets METRICS_NAMESPACE_EXCLUDE" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-exclude=dev,staging
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+        echo \"EXCLUDE=\$METRICS_NAMESPACE_EXCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"EXCLUDE=dev,staging"* ]]
+}
+
+@test "parse_arguments: no namespace args leaves both empty" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments monitoring-only
+        echo \"INCLUDE=[\$METRICS_NAMESPACE_INCLUDE]\"
+        echo \"EXCLUDE=[\$METRICS_NAMESPACE_EXCLUDE]\"
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "INCLUDE=[]"
+    echo "$output" | grep -qF "EXCLUDE=[]"
+}
+
+@test "parse_arguments: invalid namespace in include list fails before Helm" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=Bad_Namespace
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qF "Invalid namespace"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "parse_arguments: both include and exclude set is a hard error" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        log_warn() { :; }
+        show_help() { :; }
+        $(parse_namespace_args_func)
+        parse_arguments metrics-namespace-include=production metrics-namespace-exclude=dev
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -qE "both|mutually exclusive"
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # log_error — must exit 1 and print [ERROR] tag
 # ---------------------------------------------------------------------------
 
@@ -819,6 +1018,169 @@ YAML
 }
 
 # ---------------------------------------------------------------------------
+# inject_metrics_namespace_filter
+# ---------------------------------------------------------------------------
+
+namespace_filter_func() {
+    echo "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^inject_metrics_namespace_filter\(\)/,/^}/' "$SCRIPT")
+    "
+}
+
+@test "inject_metrics_namespace_filter: no-op and byte-identical when both unset" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    cp "$tmpdir/orig.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        diff orig.yaml k8s-monitoring-values.yaml && echo SAME
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SAME"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: include list renders keep rule with empty-carve-out" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production,prod-apps'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production|prod-apps)?$"'
+    echo "$output" | grep -qF "action: keep"
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: exclude list renders drop rule without carve-out" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE='dev,staging'
+        $func_body
+        inject_metrics_namespace_filter
+        grep -n 'sourceLabels: \[namespace\]' -A2 k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(dev|staging)$"'
+    echo "$output" | grep -qF "action: drop"
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: anchor is structural, survives reordering the existing keep/drop entries" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    # Swap the order of the two existing writeRelabelConfigs entries (drop
+    # before keep) to confirm injection finds the end of the list by
+    # indentation, not by matching whichever entry's "action: <value>" text
+    # happens to be last.
+    python3 - "$tmpdir/k8s-monitoring-values.yaml" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+keep_entry = re.search(r'          - sourceLabels: \[__name__\]\n            regex: "up\|container.*?\n            action: keep\n', content, re.DOTALL).group(0)
+drop_entry = re.search(r'          - sourceLabels: \[__name__\]\n            regex: "container_\(memory_failures_total.*?\n            action: drop\n', content, re.DOTALL).group(0)
+content = content.replace(keep_entry + drop_entry, drop_entry + keep_entry)
+with open(path, "w") as f:
+    f.write(content)
+PYEOF
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+        # The namespace rule must be the LAST entry in writeRelabelConfigs —
+        # i.e. no other '- sourceLabels' line may follow it before the block
+        # ends. Print everything from the namespace rule onward and count
+        # how many MORE '- sourceLabels' entries appear after it (must be 0).
+        awk '/sourceLabels: \[namespace\]/{found=1; next} found && /- sourceLabels:/{print}' k8s-monitoring-values.yaml | wc -l | tr -d ' '
+        grep -A1 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | sed -n '1p')" -eq 1 ]
+    [ "$(echo "$output" | sed -n '2p')" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: existing metric-name keep/drop rules are untouched" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[__name__\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tail -1)" -eq 2 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: idempotent on re-run (single namespace rule)" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | tail -1)" -eq 1 ]
+    rm -rf "$tmpdir"
+}
+
+@test "inject_metrics_namespace_filter: creates a distinct backup file" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        ls k8s-monitoring-values.yaml.backup-namespace-filter
+    "
+    [ "$status" -eq 0 ]
+    rm -rf "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
 # update_deployment_environment / activate_deployment_environment_in_values
 # ---------------------------------------------------------------------------
 
@@ -923,5 +1285,130 @@ load_deployment_env_helpers() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"Invalid deployment environment"* ]]
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+    rm -rf "$tmpdir"
+}
+
+# ---------------------------------------------------------------------------
+# GKE Autopilot: namespace filtering (standalone script — no sourcing)
+# ---------------------------------------------------------------------------
+
+GKE_SCRIPT="$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup_gke_autopilot.sh"
+
+@test "gke: validate_namespace_list rejects invalid namespace" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        validate_namespace_list 'Bad_Namespace'
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Invalid namespace"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "gke: build_namespace_regex matches standard script's output shape" {
+    run bash -c "
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+        build_namespace_regex 'production,prod-apps' include
+    "
+    [ "$status" -eq 0 ]
+    [ "$output" = '^(production|prod-apps)?$' ]
+}
+
+@test "gke: arg loop sets METRICS_NAMESPACE_INCLUDE from metrics-namespace-include=" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        METRICS_NAMESPACE_INCLUDE=''
+        METRICS_NAMESPACE_EXCLUDE=''
+        set -- metrics-namespace-include=production,prod-apps
+        $(awk '/^for arg in "\$@"; do/,/^done$/' "$GKE_SCRIPT")
+        echo \"INCLUDE=\$METRICS_NAMESPACE_INCLUDE\"
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF "INCLUDE=production,prod-apps"
+}
+
+@test "gke: both include and exclude set is a hard error" {
+    run bash -c "
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^validate_namespace_list\(\)/,/^}/' "$GKE_SCRIPT")
+        $(awk '/^check_namespace_filter_mutual_exclusion\(\)/,/^}/' "$GKE_SCRIPT")
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE='dev'
+        check_namespace_filter_mutual_exclusion
+        echo SHOULD_NOT_REACH
+    " 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"both"* ]] || [[ "$output" == *"mutually exclusive"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+}
+
+@test "gke: replace_placeholders injects namespace filter into temp file, leaves source untouched" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../GCP-Autopilot/k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    cp "$tmpdir/k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        kubectl() { echo 'gke-cluster'; }
+        AUTH_TOKEN='t'; OTEL_ENDPOINT='e'; MONITORING_ENDPOINT='m'
+        DEPLOYMENT_ENV=''
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+        $(awk '/^replace_placeholders\(\)/,/^}/' "$GKE_SCRIPT")
+        out=\$(replace_placeholders k8s-monitoring-values.yaml)
+        grep -n 'sourceLabels: \[namespace\]' -A2 \"\$out\"
+        diff orig.yaml k8s-monitoring-values.yaml && echo SOURCE_UNCHANGED
+    "
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
+    [[ "$output" == *"SOURCE_UNCHANGED"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "gke: replace_placeholders anchor is structural, lands after a second writeRelabelConfigs entry" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../GCP-Autopilot/k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    # Add a second writeRelabelConfigs entry after the existing one, simulating
+    # future drift from this file's current single-entry shape. The injected
+    # namespace rule must land after BOTH entries (found by indentation), not
+    # sandwiched between them by matching the first entry's "action: keep" text.
+    python3 - "$tmpdir/k8s-monitoring-values.yaml" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+extra_entry = '          - sourceLabels: [__name__]\n            regex: "extra_metric"\n            action: drop\n'
+content = re.sub(
+    r'(          - sourceLabels: \[__name__\]\n            regex: "up\|kube_.*?\n            action: keep\n)',
+    r'\1' + extra_entry,
+    content,
+)
+with open(path, "w") as f:
+    f.write(content)
+PYEOF
+    func_body_regex=$(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+    func_body_replace=$(awk '/^replace_placeholders\(\)/,/^}/' "$GKE_SCRIPT")
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        kubectl() { echo 'gke-cluster'; }
+        AUTH_TOKEN='t'; OTEL_ENDPOINT='e'; MONITORING_ENDPOINT='m'
+        DEPLOYMENT_ENV=''
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body_regex
+        $func_body_replace
+        out=\$(replace_placeholders k8s-monitoring-values.yaml)
+        grep -c 'sourceLabels: \[namespace\]' \"\$out\"
+        awk '/sourceLabels: \[namespace\]/{found=1; next} found && /- sourceLabels:/{print}' \"\$out\" | wc -l | tr -d ' '
+        grep -A1 'sourceLabels: \[namespace\]' \"\$out\"
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | sed -n '1p')" -eq 1 ]
+    [ "$(echo "$output" | sed -n '2p')" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
     rm -rf "$tmpdir"
 }
