@@ -1085,6 +1085,47 @@ namespace_filter_func() {
     rm -rf "$tmpdir"
 }
 
+@test "inject_metrics_namespace_filter: anchor is structural, survives reordering the existing keep/drop entries" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    # Swap the order of the two existing writeRelabelConfigs entries (drop
+    # before keep) to confirm injection finds the end of the list by
+    # indentation, not by matching whichever entry's "action: <value>" text
+    # happens to be last.
+    python3 - "$tmpdir/k8s-monitoring-values.yaml" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+keep_entry = re.search(r'          - sourceLabels: \[__name__\]\n            regex: "up\|container.*?\n            action: keep\n', content, re.DOTALL).group(0)
+drop_entry = re.search(r'          - sourceLabels: \[__name__\]\n            regex: "container_\(memory_failures_total.*?\n            action: drop\n', content, re.DOTALL).group(0)
+content = content.replace(keep_entry + drop_entry, drop_entry + keep_entry)
+with open(path, "w") as f:
+    f.write(content)
+PYEOF
+    func_body=$(namespace_filter_func)
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body
+        inject_metrics_namespace_filter
+        grep -c 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+        # The namespace rule must be the LAST entry in writeRelabelConfigs —
+        # i.e. no other '- sourceLabels' line may follow it before the block
+        # ends. Print everything from the namespace rule onward and count
+        # how many MORE '- sourceLabels' entries appear after it (must be 0).
+        awk '/sourceLabels: \[namespace\]/{found=1; next} found && /- sourceLabels:/{print}' k8s-monitoring-values.yaml | wc -l | tr -d ' '
+        grep -A1 'sourceLabels: \[namespace\]' k8s-monitoring-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | sed -n '1p')" -eq 1 ]
+    [ "$(echo "$output" | sed -n '2p')" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
+    rm -rf "$tmpdir"
+}
+
 @test "inject_metrics_namespace_filter: existing metric-name keep/drop rules are untouched" {
     tmpdir=$(mktemp -d)
     cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
@@ -1324,5 +1365,50 @@ GKE_SCRIPT="$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup_gke_autopilot.s
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF 'regex: "^(production)?$"'
     [[ "$output" == *"SOURCE_UNCHANGED"* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "gke: replace_placeholders anchor is structural, lands after a second writeRelabelConfigs entry" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../GCP-Autopilot/k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    # Add a second writeRelabelConfigs entry after the existing one, simulating
+    # future drift from this file's current single-entry shape. The injected
+    # namespace rule must land after BOTH entries (found by indentation), not
+    # sandwiched between them by matching the first entry's "action: keep" text.
+    python3 - "$tmpdir/k8s-monitoring-values.yaml" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+with open(path) as f:
+    content = f.read()
+extra_entry = '          - sourceLabels: [__name__]\n            regex: "extra_metric"\n            action: drop\n'
+content = re.sub(
+    r'(          - sourceLabels: \[__name__\]\n            regex: "up\|kube_.*?\n            action: keep\n)',
+    r'\1' + extra_entry,
+    content,
+)
+with open(path, "w") as f:
+    f.write(content)
+PYEOF
+    func_body_regex=$(awk '/^build_namespace_regex\(\)/,/^}/' "$GKE_SCRIPT")
+    func_body_replace=$(awk '/^replace_placeholders\(\)/,/^}/' "$GKE_SCRIPT")
+    run bash -c "
+        cd '$tmpdir'
+        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
+        kubectl() { echo 'gke-cluster'; }
+        AUTH_TOKEN='t'; OTEL_ENDPOINT='e'; MONITORING_ENDPOINT='m'
+        DEPLOYMENT_ENV=''
+        METRICS_NAMESPACE_INCLUDE='production'
+        METRICS_NAMESPACE_EXCLUDE=''
+        $func_body_regex
+        $func_body_replace
+        out=\$(replace_placeholders k8s-monitoring-values.yaml)
+        grep -c 'sourceLabels: \[namespace\]' \"\$out\"
+        awk '/sourceLabels: \[namespace\]/{found=1; next} found && /- sourceLabels:/{print}' \"\$out\" | wc -l | tr -d ' '
+        grep -A1 'sourceLabels: \[namespace\]' \"\$out\"
+    "
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | sed -n '1p')" -eq 1 ]
+    [ "$(echo "$output" | sed -n '2p')" -eq 0 ]
+    echo "$output" | grep -qF 'regex: "^(production)?$"'
     rm -rf "$tmpdir"
 }

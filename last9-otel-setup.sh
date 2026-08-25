@@ -1701,21 +1701,37 @@ inject_metrics_namespace_filter() {
         log_info "Created backup: $file.backup-namespace-filter"
     fi
 
-    # Append the new rule right after the existing __name__ drop rule, which
-    # is always the last entry in writeRelabelConfigs today (see
-    # k8s-monitoring-values.yaml). Matched on its distinctive "action: drop"
-    # line at 12-space indent — this anchor works only because "action: drop"
-    # is currently the LAST writeRelabelConfigs entry; if that ordering ever
-    # changes, this injection breaks silently unless the verification below
-    # catches it.
+    # Append the new rule at the end of the writeRelabelConfigs list, found
+    # structurally: track lines indented deeper than the "writeRelabelConfigs:"
+    # key (10+ spaces) or blank, and inject after the last such line. This
+    # is robust to reordering, added/removed entries, or reindenting within
+    # the block — unlike anchoring on a specific entry's "action: <value>"
+    # text, it doesn't depend on which entry happens to be last.
     awk -v regex="$regex" -v action="$action" '
+        BEGIN { in_block = 0; last_block_line = 0 }
         {
-            print
-            if ($0 ~ /^            action: drop$/ && !injected) {
-                print "          - sourceLabels: [namespace]"
-                print "            regex: \"" regex "\""
-                print "            action: " action
-                injected = 1
+            lines[NR] = $0
+            if ($0 ~ /^        writeRelabelConfigs:$/) {
+                in_block = 1
+                last_block_line = NR
+                next
+            }
+            if (in_block) {
+                if ($0 ~ /^          / || $0 ~ /^$/) {
+                    if ($0 !~ /^$/) last_block_line = NR
+                } else {
+                    in_block = 0
+                }
+            }
+        }
+        END {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == last_block_line) {
+                    print "          - sourceLabels: [namespace]"
+                    print "            regex: \"" regex "\""
+                    print "            action: " action
+                }
             }
         }
     ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"

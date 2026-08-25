@@ -282,11 +282,16 @@ replace_placeholders() {
 
     # Inject namespace include/exclude filter if provided (no-op when unset).
     # Only applies to k8s-monitoring-values.yaml (metrics path) — logs/traces
-    # values files never reach this branch. Anchored on the sole existing
-    # writeRelabelConfigs entry in this GKE Autopilot values file, which ends
-    # "action: keep" (unlike the main script's k8s-monitoring-values.yaml,
-    # which has a trailing "action: drop" entry to anchor on instead), so the
-    # namespace rule is appended right after it.
+    # values files never reach this branch. The rule is appended at the end
+    # of the writeRelabelConfigs list, found structurally: track lines
+    # indented deeper than the "writeRelabelConfigs:" key (10+ spaces) or
+    # blank, and inject after the last such line. This is robust to
+    # reordering, added/removed entries, or reindenting within the block —
+    # unlike anchoring on a specific entry's "action: <value>" text, it
+    # doesn't depend on which entry happens to be last (this file currently
+    # has one entry ending "action: keep"; the main script's values file
+    # has two, ending "action: drop" — the structural anchor works the same
+    # way for both).
     if [[ "$file" == *k8s-monitoring-values.yaml ]] && { [ -n "$METRICS_NAMESPACE_INCLUDE" ] || [ -n "$METRICS_NAMESPACE_EXCLUDE" ]; }; then
         local ns_regex ns_action
         if [ -n "$METRICS_NAMESPACE_INCLUDE" ]; then
@@ -297,13 +302,30 @@ replace_placeholders() {
             ns_action="drop"
         fi
         awk -v regex="$ns_regex" -v action="$ns_action" '
+            BEGIN { in_block = 0; last_block_line = 0 }
             {
-                print
-                if ($0 ~ /^            action: keep$/ && !injected) {
-                    print "          - sourceLabels: [namespace]"
-                    print "            regex: \"" regex "\""
-                    print "            action: " action
-                    injected = 1
+                lines[NR] = $0
+                if ($0 ~ /^        writeRelabelConfigs:$/) {
+                    in_block = 1
+                    last_block_line = NR
+                    next
+                }
+                if (in_block) {
+                    if ($0 ~ /^          / || $0 ~ /^$/) {
+                        if ($0 !~ /^$/) last_block_line = NR
+                    } else {
+                        in_block = 0
+                    }
+                }
+            }
+            END {
+                for (i = 1; i <= NR; i++) {
+                    print lines[i]
+                    if (i == last_block_line) {
+                        print "          - sourceLabels: [namespace]"
+                        print "            regex: \"" regex "\""
+                        print "            action: " action
+                    }
                 }
             }
         ' "$temp_file" > "${temp_file}.ns" && mv "${temp_file}.ns" "$temp_file"
