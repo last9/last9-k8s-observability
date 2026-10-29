@@ -59,6 +59,10 @@ USE_YQ=false
 DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 EXISTING_PROMETHEUS_OPERATOR=""
+EXISTING_PROMETHEUS_OPERATOR_IMAGE=""
+AGENT_STS="prom-agent-last9-k8s-monitoring-kube-prometheus"
+AGENT_RECONCILE_TRIES="${AGENT_RECONCILE_TRIES:-24}"
+AGENT_RECONCILE_INTERVAL="${AGENT_RECONCILE_INTERVAL:-5}"
 SERVER_NAME=""
 
 # Colors for output
@@ -2366,6 +2370,7 @@ detect_existing_prometheus_operator() {
         log_warn "  Two cluster-wide operators fight over the PrometheusAgent StatefulSet,"
         log_warn "  keeping the pod in a restart loop. Disabling the bundled operator."
         EXISTING_PROMETHEUS_OPERATOR="$found_ns/$found_name"
+        EXISTING_PROMETHEUS_OPERATOR_IMAGE="$found_image"
         return 0
     fi
 
@@ -2373,25 +2378,93 @@ detect_existing_prometheus_operator() {
     return 1
 }
 
+# Image tag of the config-reloader the operator stamped into our agent
+# StatefulSet. Each operator writes its own version here, so a change to the
+# external operator's tag is evidence that it (not a previous bundled operator)
+# reconciled the agent. Empty when the StatefulSet does not exist, "unknown"
+# when it exists but the tag can't be read (e.g. digest-pinned).
+agent_reloader_tag() {
+    local image
+    image=$(kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" \
+        -o jsonpath='{.spec.template.spec.containers[?(@.name=="config-reloader")].image}' 2>/dev/null) || return 0
+    case "$image" in
+        *@*|"") echo "unknown" ;;
+        *:*) echo "${image##*:}" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# Returns 0 when the operator's watch-scope flags provably exclude $NAMESPACE
+# for Prometheus/PrometheusAgent instances. Mirrors prometheus-operator:
+# --prometheus-instance-namespaces overrides --namespaces, and
+# --deny-namespaces only applies when neither allow-list is set.
+operator_excludes_namespace() {
+    local args="$1" allow deny
+    allow=$(printf '%s\n' "$args" | sed -n 's/^--prometheus-instance-namespaces=//p' | head -1)
+    [ -z "$allow" ] && allow=$(printf '%s\n' "$args" | sed -n 's/^--namespaces=//p' | head -1)
+    if [ -n "$allow" ]; then
+        case ",$allow," in *",$NAMESPACE,"*) return 1 ;; esac
+        return 0
+    fi
+    deny=$(printf '%s\n' "$args" | sed -n 's/^--deny-namespaces=//p' | head -1)
+    case ",$deny," in *",$NAMESPACE,"*) return 0 ;; esac
+    return 1
+}
+
 # With the bundled operator disabled, the customer's operator must reconcile
 # our PrometheusAgent. It silently won't if it is scoped to other namespaces
-# (prometheusInstanceNamespaces / instance selectors) or predates
-# PrometheusAgent support (< v0.64), so check the StatefulSet actually appears.
+# or predates PrometheusAgent support (< v0.64). On an upgrade the StatefulSet
+# already exists from the bundled operator, so its presence proves nothing;
+# require the reloader tag to move to the external operator's version.
+#   $1 - agent reloader tag captured before the Helm install ("" = no StatefulSet)
 verify_existing_operator_reconciles_agent() {
-    local sts="prom-agent-last9-k8s-monitoring-kube-prometheus"
-    log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to create StatefulSet $sts..."
-    local i
-    for i in $(seq 1 24); do
-        if kubectl get statefulset "$sts" -n "$NAMESPACE" &>/dev/null; then
+    local prior_tag="$1"
+    local op_ns="${EXISTING_PROMETHEUS_OPERATOR%%/*}" op_name="${EXISTING_PROMETHEUS_OPERATOR#*/}"
+    local args
+    args=$(kubectl get deployment "$op_name" -n "$op_ns" \
+        -o jsonpath='{range .spec.template.spec.containers[*]}{range .args[*]}{@}{"\n"}{end}{end}' 2>/dev/null) || args=""
+
+    if operator_excludes_namespace "$args"; then
+        log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) does not watch namespace '$NAMESPACE'."
+        log_warn "  Its --namespaces / --prometheus-instance-namespaces / --deny-namespaces flags exclude it,"
+        log_warn "  so nothing will reconcile the Last9 PrometheusAgent. Add '$NAMESPACE' to the operator's watched namespaces."
+        return 0
+    fi
+    if printf '%s\n' "$args" | grep -q '^--prometheus-instance-selector='; then
+        log_warn "⚠ The existing operator uses --prometheus-instance-selector; the Last9 PrometheusAgent must match it to be reconciled."
+    fi
+
+    local op_tag=""
+    case "$EXISTING_PROMETHEUS_OPERATOR_IMAGE" in
+        *@*) ;;
+        *:*) op_tag="${EXISTING_PROMETHEUS_OPERATOR_IMAGE##*:}" ;;
+    esac
+
+    if [ -n "$prior_tag" ] && { [ -z "$op_tag" ] || [ "$prior_tag" = "unknown" ] || [ "$prior_tag" = "$op_tag" ]; }; then
+        log_warn "⚠ Could not confirm the existing operator ($EXISTING_PROMETHEUS_OPERATOR) took over the Last9 PrometheusAgent:"
+        log_warn "  the StatefulSet predates this install and already carries the same operator version."
+        log_warn "  Verify with: kubectl logs -n $op_ns deploy/$op_name | grep $NAMESPACE/"
+        return 0
+    fi
+
+    if [ -z "$prior_tag" ]; then
+        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to create StatefulSet $AGENT_STS..."
+    else
+        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to take over StatefulSet $AGENT_STS ($prior_tag -> $op_tag)..."
+    fi
+    local i current
+    for i in $(seq 1 "$AGENT_RECONCILE_TRIES"); do
+        current=$(agent_reloader_tag)
+        if { [ -z "$prior_tag" ] && kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" &>/dev/null; } \
+            || { [ -n "$prior_tag" ] && [ "$current" = "$op_tag" ]; }; then
             log_info "✓ Existing operator is reconciling the Last9 PrometheusAgent"
             return 0
         fi
-        sleep 5
+        sleep "$AGENT_RECONCILE_INTERVAL"
     done
-    log_warn "⚠ StatefulSet $sts was not created within 2 minutes."
-    log_warn "  The existing operator ($EXISTING_PROMETHEUS_OPERATOR) is not reconciling namespace '$NAMESPACE'."
-    log_warn "  Check its --prometheus-instance-namespaces / --namespaces flags and that it is v0.64+:"
-    log_warn "    kubectl get deployment -n ${EXISTING_PROMETHEUS_OPERATOR%%/*} ${EXISTING_PROMETHEUS_OPERATOR#*/} -o jsonpath='{.spec.template.spec.containers[0].args}'"
+    log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) has not reconciled StatefulSet $AGENT_STS in namespace '$NAMESPACE'."
+    log_warn "  Check that it is v0.64+ and watches '$NAMESPACE':"
+    log_warn "    kubectl get deployment -n $op_ns $op_name -o jsonpath='{.spec.template.spec.containers[0].args}'"
     log_warn "    kubectl describe prometheusagent -n $NAMESPACE"
 }
 
@@ -2501,8 +2574,10 @@ setup_last9_monitoring() {
     # Detect an existing cluster-wide Prometheus Operator and disable the
     # bundled one if found, to prevent the two-operator reconciliation conflict.
     local operator_flag=""
+    local prior_agent_tag=""
     if detect_existing_prometheus_operator; then
         operator_flag="--set prometheusOperator.enabled=false"
+        prior_agent_tag=$(agent_reloader_tag)
     fi
 
     # Adopt any pre-existing Prometheus operator CRDs (monitoring.coreos.com)
@@ -2550,7 +2625,7 @@ setup_last9_monitoring() {
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 
     if [ -n "$EXISTING_PROMETHEUS_OPERATOR" ]; then
-        verify_existing_operator_reconciles_agent
+        verify_existing_operator_reconciles_agent "$prior_agent_tag"
     fi
 
     # Patch monitoring components with tolerations and nodeSelector if provided

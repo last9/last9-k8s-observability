@@ -56,9 +56,28 @@ EXISTING_CONTEXT="${EXISTING_CONTEXT:-}"
 
 CURRENT_CLUSTER=""
 
+# Fixture Helm release seeded by test_existing_operator ("<release> <namespace>
+# <created-namespace:0|1>"). On a shared cluster it must be removed on exit,
+# success or failure, or it lingers and the next run hits "release exists".
+FIXTURE_RELEASE=""
+
+cleanup_fixture_release() {
+    [ -z "$FIXTURE_RELEASE" ] && return 0
+    local release ns created_ns
+    read -r release ns created_ns <<< "$FIXTURE_RELEASE"
+    info "Uninstalling fixture release '$release' from '$ns'"
+    helm uninstall "$release" -n "$ns" --wait >/dev/null 2>&1 \
+        || warn "could not uninstall fixture release '$release' in '$ns'"
+    [ "$created_ns" = "1" ] && kubectl delete namespace "$ns" --ignore-not-found >/dev/null 2>&1
+    FIXTURE_RELEASE=""
+}
+
 cleanup_cluster() {
-    # Never delete a user-provided existing cluster
-    [ -n "$EXISTING_CONTEXT" ] && return 0
+    # Never delete a user-provided existing cluster; only remove what we seeded
+    if [ -n "$EXISTING_CONTEXT" ]; then
+        cleanup_fixture_release
+        return 0
+    fi
     [ -z "$CURRENT_CLUSTER" ] && return 0
     if [ "${KEEP_CLUSTER:-0}" = "1" ]; then
         warn "KEEP_CLUSTER=1 — leaving cluster '$CURRENT_CLUSTER' running"
@@ -269,6 +288,12 @@ test_existing_operator() {
     info "Installing customer kube-prometheus-stack 70.4.2 (operator v0.81.0) into 'prometheus'"
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update prometheus-community >/dev/null
+    if helm status prom -n prometheus >/dev/null 2>&1; then
+        fail "release 'prom' already exists in namespace 'prometheus'; refusing to touch it"
+    fi
+    local created_ns=1
+    kubectl get namespace prometheus >/dev/null 2>&1 && created_ns=0
+    FIXTURE_RELEASE="prom prometheus $created_ns"
     helm install prom prometheus-community/kube-prometheus-stack --version 70.4.2 \
         -n prometheus --create-namespace --wait --timeout 10m \
         --set alertmanager.enabled=false --set grafana.enabled=false \
