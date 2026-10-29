@@ -10,6 +10,8 @@ Mock kubectl (PATH override), driven by files in the mock dir:
   args      - operator container args, one per line
   sts       - agent StatefulSet config-reloader images, one per successive read;
               the last line repeats. Absent file = StatefulSet does not exist.
+  fail      - number of StatefulSet reads that fail with an API error (not
+              NotFound) before reads succeed again.
 
 Run: python3 tests/test_verify_operator_reconcile.py
 """
@@ -29,14 +31,23 @@ MOCK_KUBECTL = textwrap.dedent("""\
     case "$*" in
         "get deployment "*) [ -f "$D/args" ] && cat "$D/args" ;;
         "get statefulset "*)
-            [ -f "$D/sts" ] || exit 1
+            f=$(cat "$D/fail" 2>/dev/null || echo 0)
+            if [ "$f" -gt 0 ]; then
+                echo $((f - 1)) > "$D/fail"
+                echo "Error from server (ServiceUnavailable)" >&2
+                exit 1
+            fi
+            if [ ! -f "$D/sts" ]; then
+                case "$*" in *--ignore-not-found*) exit 0 ;; esac
+                exit 1
+            fi
             case "$*" in
                 *jsonpath*)
                     n=$(( $(cat "$D/reads" 2>/dev/null || echo 0) + 1 ))
                     echo "$n" > "$D/reads"
                     total=$(wc -l < "$D/sts")
                     [ "$n" -gt "$total" ] && n=$total
-                    sed -n "${n}p" "$D/sts" | tr -d '\\n'
+                    printf '%s\\t%s' prom-agent "$(sed -n "${n}p" "$D/sts")"
                     ;;
             esac
             ;;
@@ -60,12 +71,14 @@ OP = "quay.io/prometheus-operator/prometheus-operator:v0.81.0"
 SUCCESS = "Existing operator is reconciling"
 
 
-def verify(sts_before=None, sts_after=None, args="", op_image=OP) -> str:
+def verify(sts_before=None, sts_after=None, args="", op_image=OP, fail_reads=0) -> str:
     """sts_before: images seen when capturing the prior tag (None = no StatefulSet).
     sts_after: images seen during verification (None = unchanged)."""
     with tempfile.TemporaryDirectory() as d:
         with open(f"{d}/args", "w") as f:
             f.write(args)
+        with open(f"{d}/fail", "w") as f:
+            f.write(str(fail_reads))
         if sts_before is not None:
             with open(f"{d}/sts", "w") as f:
                 f.write("\n".join(sts_before) + "\n")
@@ -116,6 +129,17 @@ class TestVerifyExistingOperatorReconcilesAgent(unittest.TestCase):
         out = verify(sts_before=[R.rstrip(":") + "@sha256:abc"])
         self.assertNotIn(SUCCESS, out)
         self.assertIn("Could not confirm", out)
+
+    def test_failed_prior_read_is_not_absence(self):
+        # Reviewer's scenario: the pre-upgrade GET fails (503) for every retry, then the
+        # retained v0.83.0 StatefulSet is readable. Must not take the fresh-install path.
+        out = verify(sts_before=[R + "v0.83.0"], fail_reads=3, args="--controller-id=customer\n")
+        self.assertNotIn(SUCCESS, out)
+        self.assertIn("Could not confirm", out)
+
+    def test_transient_prior_read_failure_is_retried(self):
+        out = verify(sts_before=[R + "v0.83.0"], sts_after=[R + "v0.83.0", R + "v0.81.0"], fail_reads=1)
+        self.assertIn(SUCCESS, out)
 
     def test_namespaces_flag_excludes_last9(self):
         out = verify(sts_before=[R + "v0.83.0"], args="--kubelet-service=kube-system/kubelet\n--namespaces=monitoring,apps\n")

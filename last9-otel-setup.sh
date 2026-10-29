@@ -2381,17 +2381,27 @@ detect_existing_prometheus_operator() {
 # Image tag of the config-reloader the operator stamped into our agent
 # StatefulSet. Each operator writes its own version here, so a change to the
 # external operator's tag is evidence that it (not a previous bundled operator)
-# reconciled the agent. Empty when the StatefulSet does not exist, "unknown"
-# when it exists but the tag can't be read (e.g. digest-pinned).
+# reconciled the agent. Empty ONLY when the API confirms the StatefulSet does
+# not exist; "unknown" when it exists but the tag can't be read (e.g.
+# digest-pinned) or the API read keeps failing — a failed read must never be
+# mistaken for absence.
 agent_reloader_tag() {
-    local image
-    image=$(kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" \
-        -o jsonpath='{.spec.template.spec.containers[?(@.name=="config-reloader")].image}' 2>/dev/null) || return 0
-    case "$image" in
-        *@*|"") echo "unknown" ;;
-        *:*) echo "${image##*:}" ;;
-        *) echo "unknown" ;;
-    esac
+    local out attempt
+    for attempt in 1 2 3; do
+        if out=$(kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" --ignore-not-found \
+            -o jsonpath='{.metadata.name}{"\t"}{.spec.template.spec.containers[?(@.name=="config-reloader")].image}' 2>/dev/null); then
+            [ -z "$out" ] && return 0
+            local image="${out#*$'\t'}"
+            case "$image" in
+                *@*|"") echo "unknown" ;;
+                *:*) echo "${image##*:}" ;;
+                *) echo "unknown" ;;
+            esac
+            return 0
+        fi
+        [ "$attempt" -lt 3 ] && sleep "$AGENT_RECONCILE_INTERVAL"
+    done
+    echo "unknown"
 }
 
 # Returns 0 when the operator's watch-scope flags provably exclude $NAMESPACE
@@ -2442,7 +2452,8 @@ verify_existing_operator_reconciles_agent() {
 
     if [ -n "$prior_tag" ] && { [ -z "$op_tag" ] || [ "$prior_tag" = "unknown" ] || [ "$prior_tag" = "$op_tag" ]; }; then
         log_warn "⚠ Could not confirm the existing operator ($EXISTING_PROMETHEUS_OPERATOR) took over the Last9 PrometheusAgent:"
-        log_warn "  the StatefulSet predates this install and already carries the same operator version."
+        log_warn "  the StatefulSet predates this install (or could not be read), so its config-reloader"
+        log_warn "  version can't show which operator reconciled it."
         log_warn "  Verify with: kubectl logs -n $op_ns deploy/$op_name | grep $NAMESPACE/"
         return 0
     fi

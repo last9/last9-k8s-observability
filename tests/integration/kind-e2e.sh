@@ -288,17 +288,30 @@ test_existing_operator() {
     info "Installing customer kube-prometheus-stack 70.4.2 (operator v0.81.0) into 'prometheus'"
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
     helm repo update prometheus-community >/dev/null
-    if helm status prom -n prometheus >/dev/null 2>&1; then
-        fail "release 'prom' already exists in namespace 'prometheus'; refusing to touch it"
-    fi
-    local created_ns=1
-    kubectl get namespace prometheus >/dev/null 2>&1 && created_ns=0
+    # Only arm the destructive EXIT cleanup once both lookups have CONFIRMED the
+    # release (and, for deletion, the namespace) are absent. A failed lookup is
+    # not absence: fail closed rather than risk uninstalling someone else's stack.
+    local existing ns_lookup created_ns
+    existing=$(helm list -n prometheus --filter '^prom$' -q 2>/dev/null) \
+        || fail "could not check for an existing 'prom' release; refusing to continue"
+    [ -n "$existing" ] && fail "release 'prom' already exists in namespace 'prometheus'; refusing to touch it"
+    ns_lookup=$(kubectl get namespace prometheus --ignore-not-found -o name 2>/dev/null) \
+        || fail "could not check for namespace 'prometheus'; refusing to continue"
+    created_ns=1
+    [ -n "$ns_lookup" ] && created_ns=0
     FIXTURE_RELEASE="prom prometheus $created_ns"
-    helm install prom prometheus-community/kube-prometheus-stack --version 70.4.2 \
+    local install_out
+    if ! install_out=$(helm install prom prometheus-community/kube-prometheus-stack --version 70.4.2 \
         -n prometheus --create-namespace --wait --timeout 10m \
         --set alertmanager.enabled=false --set grafana.enabled=false \
-        --set prometheus-node-exporter.enabled=false --set kubeStateMetrics.enabled=false \
-        || fail "could not install customer kube-prometheus-stack"
+        --set prometheus-node-exporter.enabled=false --set kubeStateMetrics.enabled=false 2>&1); then
+        echo "$install_out"
+        # The name was taken between our lookup and install: it isn't ours, so disarm cleanup.
+        if echo "$install_out" | grep -q "cannot re-use a name"; then
+            FIXTURE_RELEASE=""
+        fi
+        fail "could not install customer kube-prometheus-stack"
+    fi
     kubectl rollout status statefulset/prometheus-prom-kube-prometheus-stack-prometheus \
         -n prometheus --timeout="$WAIT_TIMEOUT" || fail "customer Prometheus not ready before install"
 
