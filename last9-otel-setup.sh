@@ -58,6 +58,7 @@ TOLERATIONS_FILE=""
 USE_YQ=false
 DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
+EXISTING_PROMETHEUS_OPERATOR=""
 SERVER_NAME=""
 
 # Colors for output
@@ -2335,35 +2336,63 @@ create_logs_only_config() {
 # PrometheusAgent StatefulSet with their own image tags, keeping the pod
 # in a permanent restart loop (PodInitializing → Terminating → repeat).
 # Disabling the bundled operator in Last9's install resolves this.
+#
+# Detection matches on the container image, not labels: kube-prometheus-stack
+# labels its operator app.kubernetes.io/name=<nameOverride>-prometheus-operator,
+# Bitnami and jsonnet installs use other labels, so label selectors miss real
+# installs and the second operator gets deployed anyway.
 detect_existing_prometheus_operator() {
     log_info "Checking for existing Prometheus Operator installation..."
 
-    # Check for kube-prometheus-stack operator label in any namespace except ours
-    local found_ns
-    found_ns=$(kubectl get deployment -A \
-        -l "app.kubernetes.io/name=kube-prometheus-stack-operator" \
-        --no-headers 2>/dev/null \
-        | awk -v ns="$NAMESPACE" '$1 != ns {print $1}' \
-        | head -1)
+    local found
+    found=$(kubectl get deployment -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{range .spec.template.spec.containers[*]}{.image}{" "}{end}{"\n"}{end}' 2>/dev/null \
+        | awk -F'\t' -v ns="$NAMESPACE" '
+            $1 == ns { next }
+            {
+                n = split($3, imgs, " ")
+                for (i = 1; i <= n; i++) {
+                    repo = imgs[i]
+                    sub(/@.*/, "", repo)
+                    sub(/.*\//, "", repo)
+                    sub(/:.*/, "", repo)
+                    if (repo == "prometheus-operator") { print $1 "\t" $2 "\t" imgs[i]; exit }
+                }
+            }')
 
-    if [ -z "$found_ns" ]; then
-        # Fallback: generic prometheus-operator label (Helm/standalone installs)
-        found_ns=$(kubectl get deployment -A \
-            -l "app.kubernetes.io/name=prometheus-operator" \
-            --no-headers 2>/dev/null \
-            | awk -v ns="$NAMESPACE" '$1 != ns {print $1}' \
-            | head -1)
-    fi
-
-    if [ -n "$found_ns" ]; then
-        log_warn "⚠ Existing Prometheus Operator found in namespace '$found_ns'."
+    if [ -n "$found" ]; then
+        local found_ns found_name found_image
+        IFS=$'\t' read -r found_ns found_name found_image <<< "$found"
+        log_warn "⚠ Existing Prometheus Operator found: deployment '$found_name' in namespace '$found_ns' ($found_image)."
         log_warn "  Two cluster-wide operators fight over the PrometheusAgent StatefulSet,"
         log_warn "  keeping the pod in a restart loop. Disabling the bundled operator."
+        EXISTING_PROMETHEUS_OPERATOR="$found_ns/$found_name"
         return 0
     fi
 
     log_info "No existing Prometheus Operator found — bundled operator will be installed."
     return 1
+}
+
+# With the bundled operator disabled, the customer's operator must reconcile
+# our PrometheusAgent. It silently won't if it is scoped to other namespaces
+# (prometheusInstanceNamespaces / instance selectors) or predates
+# PrometheusAgent support (< v0.64), so check the StatefulSet actually appears.
+verify_existing_operator_reconciles_agent() {
+    local sts="prom-agent-last9-k8s-monitoring-kube-prometheus"
+    log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to create StatefulSet $sts..."
+    local i
+    for i in $(seq 1 24); do
+        if kubectl get statefulset "$sts" -n "$NAMESPACE" &>/dev/null; then
+            log_info "✓ Existing operator is reconciling the Last9 PrometheusAgent"
+            return 0
+        fi
+        sleep 5
+    done
+    log_warn "⚠ StatefulSet $sts was not created within 2 minutes."
+    log_warn "  The existing operator ($EXISTING_PROMETHEUS_OPERATOR) is not reconciling namespace '$NAMESPACE'."
+    log_warn "  Check its --prometheus-instance-namespaces / --namespaces flags and that it is v0.64+:"
+    log_warn "    kubectl get deployment -n ${EXISTING_PROMETHEUS_OPERATOR%%/*} ${EXISTING_PROMETHEUS_OPERATOR#*/} -o jsonpath='{.spec.template.spec.containers[0].args}'"
+    log_warn "    kubectl describe prometheusagent -n $NAMESPACE"
 }
 
 # Function to setup Last9 monitoring stack
@@ -2519,6 +2548,10 @@ setup_last9_monitoring() {
     fi
 
     log_info "✓ Last9 K8s monitoring stack deployed successfully!"
+
+    if [ -n "$EXISTING_PROMETHEUS_OPERATOR" ]; then
+        verify_existing_operator_reconciles_agent
+    fi
 
     # Patch monitoring components with tolerations and nodeSelector if provided
     # This is the primary method for applying tolerations (more reliable than Helm values)

@@ -81,6 +81,7 @@ jobs:
           - { mode: crd-conflict,           helm: v4.1.3 }
           - { mode: operator-crd-conflict,  helm: v4.1.3 }
           - { mode: context,                helm: v3.14.0 }
+          - { mode: existing-operator,      helm: v3.14.0 }
     steps:
       - uses: actions/checkout@v4
         with:
