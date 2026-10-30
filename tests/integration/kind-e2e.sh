@@ -19,6 +19,8 @@
 #   crd-conflict     Pre-seed Terraform-owned Prometheus CRDs, then monitoring-only
 #   operator-crd-conflict  Pre-seed foreign-owned OTel CRDs, then operator-only
 #   context          monitoring-only pinned to an explicit kubectl context
+#   existing-operator  Pre-install a customer kube-prometheus-stack (older operator +
+#                    Prometheus server), then monitoring-only; both must stay healthy
 #   all              Run every mode above, each in its own cluster
 #
 # Env:
@@ -54,9 +56,28 @@ EXISTING_CONTEXT="${EXISTING_CONTEXT:-}"
 
 CURRENT_CLUSTER=""
 
+# Fixture Helm release seeded by test_existing_operator ("<release> <namespace>
+# <created-namespace:0|1>"). On a shared cluster it must be removed on exit,
+# success or failure, or it lingers and the next run hits "release exists".
+FIXTURE_RELEASE=""
+
+cleanup_fixture_release() {
+    [ -z "$FIXTURE_RELEASE" ] && return 0
+    local release ns created_ns
+    read -r release ns created_ns <<< "$FIXTURE_RELEASE"
+    info "Uninstalling fixture release '$release' from '$ns'"
+    helm uninstall "$release" -n "$ns" --wait >/dev/null 2>&1 \
+        || warn "could not uninstall fixture release '$release' in '$ns'"
+    [ "$created_ns" = "1" ] && kubectl delete namespace "$ns" --ignore-not-found >/dev/null 2>&1
+    FIXTURE_RELEASE=""
+}
+
 cleanup_cluster() {
-    # Never delete a user-provided existing cluster
-    [ -n "$EXISTING_CONTEXT" ] && return 0
+    # Never delete a user-provided existing cluster; only remove what we seeded
+    if [ -n "$EXISTING_CONTEXT" ]; then
+        cleanup_fixture_release
+        return 0
+    fi
     [ -z "$CURRENT_CLUSTER" ] && return 0
     if [ "${KEEP_CLUSTER:-0}" = "1" ]; then
         warn "KEEP_CLUSTER=1 — leaving cluster '$CURRENT_CLUSTER' running"
@@ -255,6 +276,76 @@ test_operator_crd_conflict() {
     info "✓ operator-crd-conflict passed"
 }
 
+# Reproduce the Loco failure: a customer kube-prometheus-stack (operator v0.81.0,
+# chart 70.4.2) already runs a Prometheus server in its own namespace. Installing
+# a second cluster-wide operator makes both reconcile every Prometheus/
+# PrometheusAgent, flip-flopping config-reloader image tags so neither pod stays
+# up. The script must detect the existing operator by image, skip its own, and
+# leave the customer's Prometheus untouched.
+test_existing_operator() {
+    create_cluster "${CLUSTER_PREFIX}-existing-operator"
+
+    info "Installing customer kube-prometheus-stack 70.4.2 (operator v0.81.0) into 'prometheus'"
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+    helm repo update prometheus-community >/dev/null
+    # Only arm the destructive EXIT cleanup once both lookups have CONFIRMED the
+    # release (and, for deletion, the namespace) are absent. A failed lookup is
+    # not absence: fail closed rather than risk uninstalling someone else's stack.
+    local existing ns_lookup created_ns
+    existing=$(helm list -n prometheus --filter '^prom$' -q 2>/dev/null) \
+        || fail "could not check for an existing 'prom' release; refusing to continue"
+    [ -n "$existing" ] && fail "release 'prom' already exists in namespace 'prometheus'; refusing to touch it"
+    ns_lookup=$(kubectl get namespace prometheus --ignore-not-found -o name 2>/dev/null) \
+        || fail "could not check for namespace 'prometheus'; refusing to continue"
+    created_ns=1
+    [ -n "$ns_lookup" ] && created_ns=0
+    FIXTURE_RELEASE="prom prometheus $created_ns"
+    local install_out
+    if ! install_out=$(helm install prom prometheus-community/kube-prometheus-stack --version 70.4.2 \
+        -n prometheus --create-namespace --wait --timeout 10m \
+        --set alertmanager.enabled=false --set grafana.enabled=false \
+        --set prometheus-node-exporter.enabled=false --set kubeStateMetrics.enabled=false 2>&1); then
+        echo "$install_out"
+        # The name was taken between our lookup and install: it isn't ours, so disarm cleanup.
+        if echo "$install_out" | grep -q "cannot re-use a name"; then
+            FIXTURE_RELEASE=""
+        fi
+        fail "could not install customer kube-prometheus-stack"
+    fi
+    kubectl rollout status statefulset/prometheus-prom-kube-prometheus-stack-prometheus \
+        -n prometheus --timeout="$WAIT_TIMEOUT" || fail "customer Prometheus not ready before install"
+
+    local out
+    out=$(run_setup monitoring-only \
+        monitoring-endpoint="$DUMMY_METRICS" username="$DUMMY_USER" password="$DUMMY_PASS" 2>&1) \
+        || { echo "$out"; fail "monitoring-only failed with an existing operator"; }
+
+    echo "$out" | grep -q "Existing Prometheus Operator found" \
+        || { echo "$out"; fail "script did not detect the customer's kube-prometheus-stack operator"; }
+    if kubectl get deployment -n "$NAMESPACE" -o jsonpath='{.items[*].spec.template.spec.containers[*].image}' \
+        | grep -q "prometheus-operator/prometheus-operator"; then
+        fail "a second Prometheus Operator was installed in $NAMESPACE"
+    fi
+
+    assert_rollout statefulset prom-agent-last9-k8s-monitoring-kube-prometheus
+
+    # A fight shows up as repeated StatefulSet template rewrites: watch both
+    # StatefulSets' generations over several reconcile cycles (~17s each).
+    local gen_l9 gen_cust
+    gen_l9=$(kubectl get sts prom-agent-last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+    gen_cust=$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')
+    sleep 90
+    [ "$gen_l9" = "$(kubectl get sts prom-agent-last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')" ] \
+        || fail "Last9 PrometheusAgent StatefulSet keeps being rewritten (operator fight)"
+    [ "$gen_cust" = "$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')" ] \
+        || fail "customer Prometheus StatefulSet keeps being rewritten (operator fight)"
+
+    kubectl rollout status statefulset/prometheus-prom-kube-prometheus-stack-prometheus \
+        -n prometheus --timeout=60s || fail "customer Prometheus not healthy after install"
+    assert_rollout statefulset prom-agent-last9-k8s-monitoring-kube-prometheus
+    info "✓ existing-operator passed"
+}
+
 test_context() {
     create_cluster "${CLUSTER_PREFIX}-context"
     # Use the existing context when provided, else the kind-<name> context
@@ -296,6 +387,7 @@ main() {
         crd-conflict)    test_crd_conflict ;;
         operator-crd-conflict) test_operator_crd_conflict ;;
         context)         test_context ;;
+        existing-operator) test_existing_operator ;;
         all)
             test_operator_only;          cleanup_cluster
             test_logs_only;              cleanup_cluster
@@ -304,6 +396,7 @@ main() {
             test_full_install;           cleanup_cluster
             test_crd_conflict;           cleanup_cluster
             test_operator_crd_conflict;  cleanup_cluster
+            test_existing_operator;      cleanup_cluster
             test_context
             ;;
         *)
