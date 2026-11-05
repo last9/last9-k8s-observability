@@ -1787,10 +1787,12 @@ update_events_agent_cluster_name() {
             rm -f last9-kube-events-agent-values.yaml.tmp
         else
             log_info "Adding cluster.name attribute after deployment.environment..."
-            # Add the cluster.name attribute right after deployment.environment line
-            # Using awk to insert a new line after the deployment.environment line
+            # Add the cluster.name attribute right after the deployment.environment line
+            # if env= has already activated it, otherwise after the still-unactivated
+            # @DEPLOYMENT_ENVIRONMENT@ placeholder comment (events-only installs never
+            # call update_deployment_environment, so the placeholder is the common case).
             awk -v cluster="$cluster_name" '
-            /set\(resource\.attributes\["deployment\.environment"\]/ {
+            /set\(resource\.attributes\["deployment\.environment"\]/ || /@DEPLOYMENT_ENVIRONMENT@/ {
                 print
                 # Match the indentation of the previous line
                 match($0, /^[[:space:]]*/);
@@ -2752,6 +2754,13 @@ install_events_agent() {
 
     # Inject TLS server name override if provided (no-op when unset)
     inject_collector_tls_server_name "last9-kube-events-agent-values.yaml"
+
+    # Activate deployment.environment if provided. events-only mode skips the
+    # full update_deployment_environment(), which also touches collector/instrumentation
+    # files this mode never creates — so env= is applied directly to this one file.
+    if [ -n "$DEPLOYMENT_ENV" ]; then
+        activate_deployment_environment_in_values "last9-kube-events-agent-values.yaml" "$DEPLOYMENT_ENV" resource.attributes
+    fi
 
     # Add cluster name attribute to events agent values file
     update_events_agent_cluster_name

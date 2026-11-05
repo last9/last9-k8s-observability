@@ -925,3 +925,80 @@ load_deployment_env_helpers() {
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
     rm -rf "$tmpdir"
 }
+
+@test "update_events_agent_cluster_name: inserts cluster.name even when deployment.environment is still the unactivated placeholder" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        CLUSTER_NAME='minikube-test'
+        $(awk '/^sanitize_cluster_name\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_events_agent_cluster_name\(\)/,/^}/' "$SCRIPT")
+        update_events_agent_cluster_name
+        grep 'resource.attributes\[\"cluster.name\"\], \"minikube-test\"' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'resource.attributes["cluster.name"], "minikube-test"'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "update_events_agent_cluster_name: auto-detects from kubectl context when CLUSTER_NAME unset" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        CLUSTER_NAME=''
+        kubectl() { echo 'arn:aws:eks:ap-south-1:123456789012:cluster/prod-cluster'; }
+        $(awk '/^sanitize_cluster_name\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_events_agent_cluster_name\(\)/,/^}/' "$SCRIPT")
+        update_events_agent_cluster_name
+        grep 'cluster.name' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'resource.attributes["cluster.name"], "prod-cluster"'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "update_events_agent_cluster_name: re-run with a different cluster updates value in place, no duplicate line" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        $(awk '/^sanitize_cluster_name\(\)/,/^}/' "$SCRIPT")
+        log_info() { :; }; log_warn() { :; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^update_events_agent_cluster_name\(\)/,/^}/' "$SCRIPT")
+        CLUSTER_NAME='first-cluster'
+        update_events_agent_cluster_name
+        CLUSTER_NAME='second-cluster'
+        update_events_agent_cluster_name
+        grep -c 'set(resource.attributes\[\"cluster.name\"\]' last9-kube-events-agent-values.yaml
+        grep 'cluster.name' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'1\n'* ]]
+    [[ "$output" == *'second-cluster'* ]]
+    [[ "$output" != *'first-cluster'* ]]
+    rm -rf "$tmpdir"
+}
+
+@test "install_events_agent: wires env= to activate_deployment_environment_in_values on the events agent file" {
+    # install_events_agent runs kubectl/helm for real, so this checks the actual
+    # wiring exists in the function body rather than re-deriving the behavior of
+    # activate_deployment_environment_in_values (already covered by the
+    # update_deployment_environment tests above). Before this fix, env= was
+    # silently ignored for events-only installs.
+    body=$(awk '/^install_events_agent\(\)/,/^}/' "$SCRIPT")
+    [[ "$body" == *'if [ -n "$DEPLOYMENT_ENV" ]'* ]]
+    [[ "$body" == *'activate_deployment_environment_in_values "last9-kube-events-agent-values.yaml" "$DEPLOYMENT_ENV" resource.attributes'* ]]
+}
