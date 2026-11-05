@@ -985,3 +985,15 @@ YAML
     [[ "$output" == *"cluster.name\"], \"prod-us-east-1\""* ]]
     rm -rf "$tmpdir"
 }
+
+@test "last9-kube-events-agent-values.yaml: clusterRole grants events.k8s.io/events to the k8s_objects Events receiver" {
+    # Without this rule the k8s_objects receiver (watch mode on events.k8s.io/v1,
+    # Resource=events) fails at startup with a 403 and never ingests anything —
+    # confirmed live on minikube: "events.events.k8s.io is forbidden: ... cannot
+    # list resource \"events\" in API group \"events.k8s.io\" at the cluster scope".
+    values="$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml"
+    rules=$(awk '/^  rules:/,/^  clusterRoleBinding:/' "$values")
+
+    [[ "$rules" == *"events.k8s.io"* ]]
+    [[ "$rules" == *$'- events\n'* ]]
+}

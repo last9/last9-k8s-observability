@@ -488,6 +488,16 @@ clusterRole:
         - get
         - list
         - watch
+    # events.k8s.io for the k8s_objects Events receiver (watch mode)
+    - apiGroups:
+        - ''
+        - events.k8s.io
+      resources:
+        - events
+      verbs:
+        - get
+        - list
+        - watch
 
   clusterRoleBinding:
     # Annotations to add to the clusterRoleBinding
