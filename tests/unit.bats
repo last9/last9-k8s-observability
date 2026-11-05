@@ -997,3 +997,82 @@ YAML
     [[ "$rules" == *"events.k8s.io"* ]]
     [[ "$rules" == *$'- events\n'* ]]
 }
+
+# Collector signals have independent resource statements; each needs cluster.name.
+check_collector_signal_cluster_names() {
+    local installer="$1" environment="$2"
+    local values="$BATS_TEST_TMPDIR/last9-otel-collector-values.yaml"
+    sed '/cluster\.name/d' "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" > "$values"
+
+    run bash -eu -c '
+        eval "$(awk '\''/^(sanitize_cluster_name|escape_for_sed|activate_deployment_environment_in_values|update_cluster_name_attribute)\(\)/,/^}/'\'' "$1")"
+        log_info() { :; }
+        log_warn() { echo "$*" >&2; }
+        cd "$2"
+        CLUSTER_NAME=prod-cluster
+        if [ -n "$3" ]; then
+            activate_deployment_environment_in_values last9-otel-collector-values.yaml "$3" attributes
+        fi
+        if [ "$4" = duplicate ]; then
+            # Custom values can retain more than one environment anchor per block.
+            awk '\''{ print } /@DEPLOYMENT_ENVIRONMENT@|deployment\.environment/ { print }'\'' \
+                last9-otel-collector-values.yaml > duplicated.yaml
+            mv duplicated.yaml last9-otel-collector-values.yaml
+        fi
+        update_cluster_name_attribute
+    ' bash "$installer" "$BATS_TEST_TMPDIR" "$environment" "${3:-single}"
+    [ "$status" -eq 0 ]
+
+    # Count within each signal, rather than accepting three copies in one block.
+    assert_collector_signal_cluster_names "$values"
+    cp "$values" "$values.first"
+    run bash -eu -c '
+        eval "$(awk '\''/^(sanitize_cluster_name|update_cluster_name_attribute)\(\)/,/^}/'\'' "$1")"
+        log_info() { :; }
+        log_warn() { echo "$*" >&2; }
+        cd "$2"
+        CLUSTER_NAME=prod-cluster
+        update_cluster_name_attribute
+    ' bash "$installer" "$BATS_TEST_TMPDIR"
+    [ "$status" -eq 0 ]
+    cmp "$values.first" "$values"
+}
+
+assert_collector_signal_cluster_names() {
+    awk '
+        /log_statements:/ { signal = "logs" }
+        /metric_statements:/ { signal = "metrics" }
+        /trace_statements:/ { signal = "traces" }
+        /set\(attributes\["cluster.name"\], "prod-cluster"\)/ { count[signal]++ }
+        END {
+            if (count["logs"] != 1 || count["metrics"] != 1 || count["traces"] != 1) {
+                printf "Expected one cluster statement per signal; logs=%d metrics=%d traces=%d\n", count["logs"], count["metrics"], count["traces"]
+                exit 1
+            }
+        }
+    ' "$1"
+}
+
+@test "collector cluster.name: standard installer stamps all signals without env=" {
+    check_collector_signal_cluster_names "$SCRIPT" ""
+}
+
+@test "collector cluster.name: standard installer stamps all signals with env=" {
+    check_collector_signal_cluster_names "$SCRIPT" production
+}
+
+@test "collector cluster.name: Autopilot installer stamps all signals without env=" {
+    check_collector_signal_cluster_names "$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup.sh" ""
+}
+
+@test "collector cluster.name: Autopilot installer stamps all signals with env=" {
+    check_collector_signal_cluster_names "$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup.sh" production
+}
+
+@test "collector cluster.name: duplicate anchors still stamp each signal only once" {
+    for installer in "$SCRIPT" "$BATS_TEST_DIRNAME/../GCP-Autopilot/last9-otel-setup.sh"; do
+        for environment in "" production; do
+            check_collector_signal_cluster_names "$installer" "$environment" duplicate
+        done
+    done
+}

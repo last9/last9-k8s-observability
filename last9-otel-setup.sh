@@ -1730,9 +1730,10 @@ update_cluster_name_attribute() {
             rm -f last9-otel-collector-values.yaml.tmp
         else
             log_info "Adding cluster.name attribute (anchor: @DEPLOYMENT_ENVIRONMENT@ or deployment.environment)..."
-            # Insert once after the env placeholder comment or an activated deployment.environment
-            # set() line — never require env= to have run first (collector has multiple placeholders).
+            # Each signal has its own resource statements. Insert once per block,
+            # whether the environment anchor is still a placeholder or already activated.
             awk -v cluster="$cluster_name" '
+            /^[[:space:]]*statements:/ { done = 0 }
             !done && (/# @DEPLOYMENT_ENVIRONMENT@/ || /set\(attributes\["deployment\.environment"\]/) {
                 print
                 match($0, /^[[:space:]]*/);
