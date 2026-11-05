@@ -156,6 +156,7 @@ config:
             # Use additional resource attributes to differentiate between clusters and deployments.
             # set(resource.attributes["<key>"], value)
             # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
+            - set(resource.attributes["cluster.name"], "{{CLUSTER_NAME}}")
 
             # Set timestamp from event creation time
             - set(log.time_unix_nano, UnixNano(Time(log.body["object"]["metadata"]["creationTimestamp"], "%Y-%m-%dT%H:%M:%SZ"))) where log.time_unix_nano == 0

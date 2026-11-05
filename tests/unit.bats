@@ -925,3 +925,63 @@ load_deployment_env_helpers() {
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
     rm -rf "$tmpdir"
 }
+
+# ---------------------------------------------------------------------------
+# update_events_agent_cluster_name — must not depend on env= / deployment.environment
+# ---------------------------------------------------------------------------
+
+@test "update_events_agent_cluster_name: inserts cluster.name when env= unset (no deployment.environment set line)" {
+    # Regression: insert path used to awk-anchor on set(resource.attributes["deployment.environment"]),
+    # which only exists after env= activates @DEPLOYMENT_ENVIRONMENT@. Without env=, cluster.name
+    # was silently dropped and events-only installs lost the K8s Events tab filter attribute.
+    tmpdir=$(mktemp -d)
+    cat > "$tmpdir/last9-kube-events-agent-values.yaml" <<'YAML'
+config:
+  processors:
+    transform/logs/last9:
+      log_statements:
+        - context: log
+          statements:
+            - set(resource.attributes["service.name"], "k8s-events")
+            # @DEPLOYMENT_ENVIRONMENT@ unset by default; pass env=<environment> at install to set it
+
+            - set(log.severity_text, "INFO")
+YAML
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        log_info() { :; }; log_warn() { echo \"[WARN] \$1\"; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^sanitize_cluster_name\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^update_events_agent_cluster_name\(\)/,/^}/' "$SCRIPT")
+        CLUSTER_NAME='customer-cluster'
+        update_events_agent_cluster_name
+        grep 'resource.attributes\[\"cluster.name\"\], \"customer-cluster\"' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cluster.name\"], \"customer-cluster\""* ]]
+    ! grep -q 'Could not verify cluster.name' <<<"$output"
+    rm -rf "$tmpdir"
+}
+
+@test "update_events_agent_cluster_name: updates bundled {{CLUSTER_NAME}} placeholder without env=" {
+    tmpdir=$(mktemp -d)
+    cp "$BATS_TEST_DIRNAME/../last9-kube-events-agent-values.yaml" "$tmpdir/"
+
+    run bash -c "
+        cd '$tmpdir'
+        RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+        log_info() { :; }; log_warn() { echo \"[WARN] \$1\"; }
+        log_error() { echo \"[ERROR] \$1\" >&2; exit 1; }
+        $(awk '/^sanitize_cluster_name\(\)/,/^}/' "$SCRIPT")
+        $(awk '/^update_events_agent_cluster_name\(\)/,/^}/' "$SCRIPT")
+        CLUSTER_NAME='prod-us-east-1'
+        update_events_agent_cluster_name
+        grep 'resource.attributes\[\"cluster.name\"\], \"prod-us-east-1\"' last9-kube-events-agent-values.yaml
+        grep -c 'cluster\.name' last9-kube-events-agent-values.yaml
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cluster.name\"], \"prod-us-east-1\""* ]]
+    rm -rf "$tmpdir"
+}

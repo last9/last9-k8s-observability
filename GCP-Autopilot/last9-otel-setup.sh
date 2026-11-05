@@ -1339,16 +1339,16 @@ update_cluster_name_attribute() {
             sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$cluster_name\"/" last9-otel-collector-values.yaml
             rm -f last9-otel-collector-values.yaml.tmp
         else
-            log_info "Adding cluster.name attribute after deployment.environment..."
-            # Add the cluster.name attribute right after deployment.environment line
-            # Using awk to insert a new line after the deployment.environment line
+            log_info "Adding cluster.name attribute (anchor: @DEPLOYMENT_ENVIRONMENT@ or deployment.environment)..."
+            # Insert once after the env placeholder comment or an activated deployment.environment
+            # set() line — never require env= to have run first (collector has multiple placeholders).
             awk -v cluster="$cluster_name" '
-            /set\(attributes\["deployment\.environment"\]/ {
+            !done && (/# @DEPLOYMENT_ENVIRONMENT@/ || /set\(attributes\["deployment\.environment"\]/) {
                 print
-                # Match the indentation of the previous line
                 match($0, /^[[:space:]]*/);
                 indent = substr($0, RSTART, RLENGTH);
                 print indent "- set(attributes[\"cluster.name\"], \"" cluster "\")"
+                done = 1
                 next
             }
             {print}
@@ -1392,16 +1392,16 @@ update_events_agent_cluster_name() {
             sed -i.tmp "s/cluster\.name\"], \"[^\"]*\"/cluster.name\"], \"$cluster_name\"/" last9-kube-events-agent-values.yaml
             rm -f last9-kube-events-agent-values.yaml.tmp
         else
-            log_info "Adding cluster.name attribute after deployment.environment..."
-            # Add the cluster.name attribute right after deployment.environment line
-            # Using awk to insert a new line after the deployment.environment line
+            log_info "Adding cluster.name attribute (anchor: @DEPLOYMENT_ENVIRONMENT@ or deployment.environment)..."
+            # Insert after the env placeholder comment or an activated deployment.environment
+            # set() line. Must not require env= — otherwise events-only installs drop cluster.name.
             awk -v cluster="$cluster_name" '
-            /set\(resource\.attributes\["deployment\.environment"\]/ {
+            !done && (/# @DEPLOYMENT_ENVIRONMENT@/ || /set\(resource\.attributes\["deployment\.environment"\]/) {
                 print
-                # Match the indentation of the previous line
                 match($0, /^[[:space:]]*/);
                 indent = substr($0, RSTART, RLENGTH);
                 print indent "- set(resource.attributes[\"cluster.name\"], \"" cluster "\")"
+                done = 1
                 next
             }
             {print}
