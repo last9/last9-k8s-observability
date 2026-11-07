@@ -27,6 +27,7 @@ COL_IMAGE = "otel/opentelemetry-collector-contrib:0.156.0"
 TA_URL = "http://last9-target-allocator-ta.last9.svc:80"
 METRICS_VALUES = "last9-otel-metrics-values.yaml"
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "k8s-monitoring-values.e1ad5c9.yaml")
+KPS_REPO = "https://prometheus-community.github.io/helm-charts"
 
 
 def render(chart, version, values, release="rel"):
@@ -91,8 +92,9 @@ class TargetAllocatorValues(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write(src)
         try:
+            # --repo, not a repo alias: CI only adds the open-telemetry repo.
             out = subprocess.run(
-                ["helm", "template", "last9-k8s-monitoring", "prometheus-community/kube-prometheus-stack",
+                ["helm", "template", "last9-k8s-monitoring", "kube-prometheus-stack", "--repo", KPS_REPO,
                  "--version", "75.15.1", "--namespace", "last9", "-f", f.name, "--skip-schema-validation"],
                 check=True, capture_output=True, text=True).stdout
         finally:
