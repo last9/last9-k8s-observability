@@ -2538,84 +2538,89 @@ install_metrics_scraper() {
     log_info "✓ OTel metrics scraper installed"
 }
 
-# Wait until the Target Allocator serves the core scrape jobs and the collector exports samples.
+# Wait until the Target Allocator serves the core scrape jobs and the collector replicas,
+# combined, scrape them successfully and export to Last9.
 # Returns 0 when healthy, 1 (after warning what is missing) on timeout.
 verify_metrics_scraper() {
     local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
-    local waited=0 missing configs metrics totals sent failed
+    local waited=0 missing configs pods pod metrics health totals sent failed
     local prev_sent="" prev_failed=""
-    local ta_proxy="/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy"
-    local col_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy"
-    # Collector's local `up` exporter (pipeline metrics/scrape_health in last9-otel-metrics-values.yaml)
-    local health_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:9465/proxy"
-    local pf_dir ta_pid="" col_pid="" health_pid="" ta_port="" col_port="" health_port=""
+    local ta="svc/last9-target-allocator-ta" pf_dir
     pf_dir=$(mktemp -d)
     # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
     # on a random free local port. Forwards are reused across polls and always killed on return.
-    trap '{ [ -z "$ta_pid" ] || kill "$ta_pid" 2>/dev/null || true; }; { [ -z "$col_pid" ] || kill "$col_pid" 2>/dev/null || true; }; { [ -z "$health_pid" ] || kill "$health_pid" 2>/dev/null || true; }; rm -rf "$pf_dir"; trap - RETURN' RETURN
+    trap 'for f in "$pf_dir"/*.pid; do { [ ! -s "$f" ] || kill "$(cat "$f")" 2>/dev/null || true; }; done; rm -rf "$pf_dir"; trap - RETURN' RETURN
 
-    # $1 = ta|col|health. Runs in the main shell (state lives in the <who>_pid/<who>_port vars):
-    # prefers the apiserver proxy; otherwise (re)starts a port-forward and records its local port.
+    # $1 = svc/<name> or pod/<name>, $2 = remote port. Prints its apiserver proxy base path.
+    scraper_proxy() {
+        local kind=services
+        case "$1" in pod/*) kind=pods ;; esac
+        printf '/api/v1/namespaces/%s/%s/%s:%s/proxy' "$NAMESPACE" "$kind" "${1#*/}" "$2"
+    }
+
+    # $1 = svc/<name> or pod/<name>, $2 = remote port, $3 = probe path. Runs in the main shell:
+    # prefers the apiserver proxy; otherwise (re)starts a port-forward. Forward state lives in
+    # $pf_dir/<ref>-<port>.{pid,port,log}.
     scraper_access() {
-        local who="$1" probe ref rport pid port="" i log="$pf_dir/$1.log"
-        case "$who" in
-            ta) probe="$ta_proxy/scrape_configs"; ref="svc/last9-target-allocator-ta"; rport=80; pid=$ta_pid ;;
-            col) probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid ;;
-            health) probe="$health_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=9465; pid=$health_pid ;;
-        esac
-        if kubectl get --raw "$probe" >/dev/null 2>&1; then
+        local ref="$1" rport="$2" probe="$3" state pid port="" i
+        state="$pf_dir/${ref//\//_}-$rport"
+        pid=$(cat "$state.pid" 2>/dev/null || true)
+        if kubectl get --raw "$(scraper_proxy "$ref" "$rport")$probe" >/dev/null 2>&1; then
             { [ -z "$pid" ] || kill "$pid" 2>/dev/null || true; }
             pid=""
         elif [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-            : > "$log"
-            kubectl port-forward -n "$NAMESPACE" "$ref" ":$rport" >"$log" 2>&1 &
+            : > "$state.log"
+            kubectl port-forward -n "$NAMESPACE" "$ref" ":$rport" >"$state.log" 2>&1 &
             pid=$!
             for i in 1 2 3 4 5 6 7 8 9 10; do
-                port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+                port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$state.log" | head -1)
                 [ -n "$port" ] && break
                 sleep 0.5
             done
         else
-            port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+            port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$state.log" | head -1)
         fi
-        case "$who" in
-            ta) ta_pid=$pid; ta_port=$port ;;
-            col) col_pid=$pid; col_port=$port ;;
-            health) health_pid=$pid; health_port=$port ;;
-        esac
+        printf '%s' "$pid" > "$state.pid"
+        printf '%s' "$port" > "$state.port"
     }
 
-    # $1 = ta|col|health, $2 = path. Pure read (safe in $(...)); non-zero when unreachable.
+    # $1 = svc/<name> or pod/<name>, $2 = remote port, $3 = path.
+    # Pure read (safe in $(...)); non-zero when unreachable.
     scraper_get() {
-        local who="$1" path="$2" port proxy
-        case "$who" in
-            ta) port=$ta_port; proxy=$ta_proxy ;;
-            col) port=$col_port; proxy=$col_proxy ;;
-            health) port=$health_port; proxy=$health_proxy ;;
-        esac
+        local port
+        port=$(cat "$pf_dir/${1//\//_}-$2.port" 2>/dev/null || true)
         if [ -n "$port" ]; then
-            curl -fsS --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null
+            curl -fsS --max-time 10 "http://127.0.0.1:$port$3" 2>/dev/null
         else
-            kubectl get --raw "$proxy$path" 2>/dev/null
+            kubectl get --raw "$(scraper_proxy "$1" "$2")$3" 2>/dev/null
         fi
     }
 
     log_info "Verifying OTel metrics scraper (up to ${timeout}s)..."
     while true; do
         missing=""
-        scraper_access ta
-        scraper_access col
-        scraper_access health
-        configs=$(scraper_get ta /scrape_configs || true)
+        scraper_access "$ta" 80 /scrape_configs
+        configs=$(scraper_get "$ta" 80 /scrape_configs || true)
         # Scope to this release's ServiceMonitors (TA job names: serviceMonitor/<ns>/<name>/<n>);
         # a customer's own KSM/node-exporter ServiceMonitor must not satisfy the check.
         printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*kube-state-metrics" || missing="$missing target-allocator-job:kube-state-metrics"
         printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*node-exporter" || missing="$missing target-allocator-job:node-exporter"
         printf '%s' "$configs" | grep -q '"kubelet"' || missing="$missing target-allocator-job:kubelet"
         # Job presence is not enough: kubelet discovery must yield at least one target.
-        scraper_get ta /jobs/kubelet/targets 2>/dev/null \
+        scraper_get "$ta" 80 /jobs/kubelet/targets 2>/dev/null \
             | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
-        metrics=$(scraper_get col /metrics || true)
+        # The Target Allocator shards targets across collector replicas: read every replica's
+        # telemetry (:8888) and local `up` exporter (:9465, pipeline metrics/scrape_health) and combine.
+        pods=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=last9-otel-metrics \
+            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+        [ -n "${pods// /}" ] || missing="$missing collector-pods(0)"
+        metrics="" health=""
+        for pod in $pods; do
+            scraper_access "pod/$pod" 8888 /metrics
+            scraper_access "pod/$pod" 9465 /metrics
+            metrics="$metrics$(scraper_get "pod/$pod" 8888 /metrics || true)"$'\n'
+            health="$health$(scraper_get "pod/$pod" 9465 /metrics || true)"$'\n'
+        done
         # Sum series by name prefix; collector 0.156 may or may not append _total.
         # Only the remote-write exporter counts: the local scrape_health exporter
         # also sends points, and those prove nothing about reaching Last9.
@@ -2636,7 +2641,7 @@ verify_metrics_scraper() {
         prev_sent=$sent; prev_failed=$failed
         # Exports alone are not proof: a blocked scrape still exports a synthetic up=0.
         # Require a successful scrape (up == 1) of each core target this release ships.
-        missing="$missing$(scraper_get health /metrics 2>/dev/null | NS="$NAMESPACE" awk '
+        missing="$missing$(printf '%s' "$health" | NS="$NAMESPACE" awk '
             function label(name,   m) {
                 if (match($0, "[{,]" name "=\"[^\"]*\"")) { m = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", m); sub(/"$/, "", m); return m }
                 return ""
