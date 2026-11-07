@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Parity gate: old (kube-prometheus-stack PrometheusAgent) vs new (OTel Collector + Target Allocator)
 # on a kind cluster, both remote-writing to one in-cluster VictoriaMetrics.
-# Usage: tests/integration/parity-gate.sh   (env: KEEP_CLUSTER=1 to keep the cluster, WAIT=240, WAIT2=150)
+# Usage: tests/integration/parity-gate.sh   (env: KEEP_CLUSTER=1 to keep the cluster, WAIT=420 (min 7 min so rate[5m] is full), WAIT2=300 (the old operator takes ~2.5 min to reload remote_write config))
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 CL=parity; CTX=kind-$CL; NS=last9
-WAIT="${WAIT:-240}"; WAIT2="${WAIT2:-150}"
+WAIT="${WAIT:-420}"; WAIT2="${WAIT2:-300}"
 W="$(mktemp -d)"
 K() { kubectl --context "$CTX" "$@"; }
 H() { helm --kube-context "$CTX" "$@"; }
@@ -84,11 +84,8 @@ perl -pe 's/^(\s*)cluster: "\{\{CLUSTER_NAME\}\}"/$1cluster: "parity"\n$1pipelin
 perl -pe 's/\{\{APP_METRICS_KEEP_ALT\}\}/|parity_app_.*/' "$ROOT/last9-otel-metrics-values.yaml" \
   | perl -pe 's/^(\s*)cluster: "\{\{CLUSTER_NAME\}\}"/$1cluster: "parity"\n$1pipeline: otel/; s/\{\{LAST9_METRICS_ENDPOINT\}\}/'"${VM_RW//\//\\/}"'/' > "$W/otel-app.yaml"
 grep -q 'pipeline: otel' "$W/otel.yaml" && ! grep -v '^ *#' "$W/otel.yaml" | grep -q '{{' || { echo "collector values fill failed"; exit 2; }
-# GATE WORKAROUND (finding for the values file): with every receiver port disabled the chart renders a Service with
-# no ports and the install fails ("spec.ports: Required value"). Disabled here, not in last9-otel-metrics-values.yaml.
-printf 'service:\n  enabled: false\n' > "$W/svc-off.yaml"
 H install last9-target-allocator open-telemetry/opentelemetry-target-allocator --version 0.156.0 -n $NS -f "$W/ta.yaml" --wait --timeout 5m || { echo "TA install failed"; exit 2; }
-H install last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel.yaml" -f "$W/svc-off.yaml" --wait --timeout 5m || { echo "collector install failed"; exit 2; }
+H install last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel.yaml" --wait --timeout 5m || { echo "collector install failed"; exit 2; }
 
 echo "### 5. sample app"
 K create ns parity-app
@@ -112,7 +109,7 @@ for p in prom otel; do
 done
 
 echo "### 9. app-metrics opt-in (both pipelines)"
-H upgrade last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel-app.yaml" -f "$W/svc-off.yaml" --wait --timeout 5m || fail "collector upgrade"
+H upgrade last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel-app.yaml" --wait --timeout 5m || fail "collector upgrade"
 H upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack --version 75.15.1 -n $NS -f "$W/old-app.yaml" -f "$W/old-extra.yaml" --wait --timeout 8m || fail "old upgrade"
 echo "waiting ${WAIT2}s"; sleep "$WAIT2"
 for m in parity_app_requests_total parity_app_latency_seconds_bucket parity_app_latency_seconds_sum parity_app_latency_seconds_count; do

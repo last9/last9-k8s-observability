@@ -7,6 +7,29 @@
 # labelled app.kubernetes.io/instance: last9-otel-metrics.
 fullnameOverride: last9-target-allocator
 
+# Secrets read access: ServiceMonitor/PodMonitor basicAuth/bearer secrets (the old Prometheus Operator read them too).
+extraObjects:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: last9-target-allocator-secrets
+    rules:
+      - apiGroups: [""]
+        resources: [secrets]
+        verbs: [get, list, watch]
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: last9-target-allocator-secrets
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: last9-target-allocator-secrets
+    subjects:
+      - kind: ServiceAccount
+        name: last9-target-allocator-ta
+        namespace: last9
+
 targetAllocator:
   serviceAccount:
     # ec2-metadata discovery (ec2_sd_configs below) now runs in THIS pod, so the IRSA role
@@ -61,6 +84,9 @@ targetAllocator:
               target_label: node
             - source_labels: [__metrics_path__]
               target_label: metrics_path
+            # role: node defaults instance to the node NAME; the operator's endpoints role used the address (node InternalIP:10250)
+            - source_labels: [__address__]
+              target_label: instance
           metric_relabel_configs:
             - action: drop
               source_labels: [__name__, le]

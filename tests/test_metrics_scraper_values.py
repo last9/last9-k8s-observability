@@ -119,6 +119,7 @@ class TargetAllocatorValues(unittest.TestCase):
                                       "endpoint": ep["port"]})
             self.assertIn({"source_labels": ["__meta_kubernetes_node_name"], "target_label": "node"}, rel)
             self.assertIn({"source_labels": ["__metrics_path__"], "target_label": "metrics_path"}, rel)
+            self.assertIn({"source_labels": ["__address__"], "target_label": "instance"}, rel)
         self.assertEqual(jobs[0]["job_name"], "kubelet")
         self.assertEqual([j["metrics_path"] for j in jobs],
                          ["/metrics", "/metrics/cadvisor", "/metrics/probes", "/metrics/resource/v1alpha1"])
@@ -135,6 +136,11 @@ class TargetAllocatorValues(unittest.TestCase):
         for res in ("pods", "services", "endpoints", "nodes", "namespaces"):
             self.assertTrue(granted("", res), res)
         self.assertTrue(granted("discovery.k8s.io", "endpointslices"))
+        self.assertTrue(granted("", "secrets"))
+        crbs = [b for b in kind(self.docs, "ClusterRoleBinding")
+                if b["roleRef"]["name"] == "last9-target-allocator-secrets"]
+        sa = [d["metadata"]["name"] for d in kind(self.docs, "ServiceAccount")]
+        self.assertEqual([s["name"] for b in crbs for s in b["subjects"]], sa)
 
     def test_ta_service_name(self):
         # chart hardcodes the "-ta" suffix on the Service name (<fullname>-ta)
@@ -177,6 +183,9 @@ class MetricsCollectorValues(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         os.unlink(cls.vals)
+
+    def test_no_collector_service(self):
+        self.assertEqual(kind(self.docs, "Service"), [])
 
     def test_exporter_parity(self):
         e = self.cfg["exporters"]["prometheusremotewrite/last9"]

@@ -108,7 +108,7 @@ kubectl get secrets -n last9 last9-remote-write-secret
 >
 > Re-run the same `monitoring-only` command. If a `last9-k8s-monitoring` release already exists, the script first installs the OTel scraper and waits until it is exporting, and only then upgrades `last9-k8s-monitoring` with Prometheus disabled, so there is no gap in metrics. If the scraper does not become healthy, Prometheus is left running untouched and the script exits non-zero; fix the problem and re-run. During the short verify window the old and new pipelines both write, and the old series carry `prometheus`/`prometheus_replica` labels, so brief duplicate series are expected (the Target Allocator may also briefly scrape kubelet twice, because the old kubelet ServiceMonitor stays until the kube-prometheus-stack upgrade removes it). kubelet/cAdvisor are now scraped directly by the Target Allocator (the bundled operator that maintained the kubelet Service is gone); the script removes the orphaned operator-created kubelet Service in `kube-system` when it matches this release.
 >
-> **Application metrics:** pass `app-metrics-keep=<regex>` to also forward application metric names matching the regex (alternated into the default allowlist).
+> **Application metrics:** pass `app-metrics-keep=<regex>` to also forward application metric names matching the regex (alternated into the default allowlist). `le`/`quantile` label values are formatted without a trailing `.0` (e.g. `1` not `1.0`).
 >
 > **EC2 / IRSA:** the `ec2-metadata` job's IAM role annotation (`eks.amazonaws.com/role-arn`) now goes on the `last9-target-allocator` service account (in `last9-target-allocator-values.yaml`), not on a Prometheus service account. Pod Identity needs no annotation.
 >

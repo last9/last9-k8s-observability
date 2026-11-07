@@ -13,6 +13,13 @@ IGNORED = {"pipeline", "prometheus", "prometheus_replica"}
 STRICT = {"job", "namespace", "service", "endpoint", "metrics_path", "node", "instance", "cluster"}
 
 
+def num(v):
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
 def get(base, path, **params):
     url = base.rstrip("/") + path + "?" + urllib.parse.urlencode(params, doseq=True)
     with urllib.request.urlopen(url, timeout=60) as r:
@@ -23,8 +30,8 @@ def get(base, path, **params):
 
 
 def series(base, k, v, window, name_re):
-    now = int(time.time())
-    data = get(base, "/api/v1/series", **{"match[]": '{%s="%s"}' % (k, v), "start": now - window, "end": now})
+    # instant query, not /series: VM's series API matches by day index so it returns startup-transient series outside the window
+    data = [r["metric"] for r in get(base, "/api/v1/query", query='last_over_time({%s="%s"}[%ds])' % (k, v, window))["result"]]
     out = {}  # name -> {key -> set(values)}
     for s in data:
         n = s["__name__"]
@@ -74,6 +81,8 @@ def main():
     for n in sorted(set(A) & set(B)):
         for lk in sorted(set(A[n]) & set(B[n])):
             x, y = A[n][lk], B[n][lk]
+            if lk in ("le", "quantile"):
+                x, y = {num(v) for v in x}, {num(v) for v in y}
             if x != y:
                 strict = lk in STRICT
                 ns += strict

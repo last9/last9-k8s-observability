@@ -30,6 +30,10 @@ clusterRole:
     - nonResourceURLs: [/metrics, /metrics/cadvisor]
       verbs: [get]
 
+# every receiver port is disabled below; the chart would render a port-less Service the apiserver rejects
+service:
+  enabled: false
+
 ports:
   otlp:
     enabled: false
