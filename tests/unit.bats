@@ -434,9 +434,6 @@ collector_tls_func() {
     collector_values_helpers_func
     awk '/^inject_collector_tls_server_name\(\)/,/^}/' "$SCRIPT"
 }
-monitoring_tls_func() {
-    awk '/^inject_monitoring_tls_server_name\(\)/,/^}/' "$SCRIPT"
-}
 
 legacy_collector_values_fixture() {
     cat <<'YAML'
@@ -673,25 +670,6 @@ YAML
     rm -rf "$tmpdir"
 }
 
-@test "inject_monitoring_tls: adds tlsConfig.serverName under remoteWrite url" {
-    tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
-    func_body=$(monitoring_tls_func)
-    run bash -c "
-        cd '$tmpdir'
-        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
-        SERVER_NAME='metrics.last9.io'
-        $func_body
-        inject_monitoring_tls_server_name
-        grep -n 'serverName' k8s-monitoring-values.yaml
-    "
-    [ "$status" -eq 0 ]
-    # serverName indented 10 spaces; tlsConfig at 8 spaces
-    [[ "$output" == *"          serverName: metrics.last9.io"* ]]
-    grep -q '^        tlsConfig:' "$tmpdir/k8s-monitoring-values.yaml"
-    rm -rf "$tmpdir"
-}
-
 @test "inject_collector_tls: no-op and byte-identical when SERVER_NAME empty" {
     tmpdir=$(mktemp -d)
     cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/orig.yaml"
@@ -728,24 +706,6 @@ YAML
     rm -rf "$tmpdir"
 }
 
-@test "inject_monitoring_tls: no-op and byte-identical when SERVER_NAME empty" {
-    tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
-    cp "$tmpdir/orig.yaml" "$tmpdir/k8s-monitoring-values.yaml"
-    func_body=$(monitoring_tls_func)
-    run bash -c "
-        cd '$tmpdir'
-        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
-        SERVER_NAME=''
-        $func_body
-        inject_monitoring_tls_server_name
-        diff orig.yaml k8s-monitoring-values.yaml && echo SAME
-    "
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"SAME"* ]]
-    rm -rf "$tmpdir"
-}
-
 @test "inject_collector_tls: adds override under existing tls block, no duplicate tls:" {
     tmpdir=$(mktemp -d)
     cat > "$tmpdir/last9-otel-collector-values.yaml" <<'YAML'
@@ -775,69 +735,6 @@ YAML
     rm -rf "$tmpdir"
 }
 
-@test "inject_monitoring_tls: idempotent on re-run (single serverName)" {
-    tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
-    func_body=$(monitoring_tls_func)
-    run bash -c "
-        cd '$tmpdir'
-        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
-        SERVER_NAME='metrics.last9.io'
-        $func_body
-        inject_monitoring_tls_server_name
-        inject_monitoring_tls_server_name
-        grep -c 'serverName:' k8s-monitoring-values.yaml
-    "
-    [ "$status" -eq 0 ]
-    [ "$(echo "$output" | tail -1)" -eq 1 ]
-    rm -rf "$tmpdir"
-}
-
-@test "inject_monitoring_tls: unrelated serverName elsewhere does not block injection" {
-    tmpdir=$(mktemp -d)
-    {
-        echo "prometheus:"
-        echo "  prometheusSpec:"
-        echo "    remoteWrite:"
-        echo '      - url: "{{YOUR_MONITORING_ENDPOINT}}"'
-        echo "someOtherComponent:"
-        echo "  serverName: unrelated.example.com"
-    } > "$tmpdir/k8s-monitoring-values.yaml"
-    func_body=$(monitoring_tls_func)
-    run bash -c "
-        cd '$tmpdir'
-        log_info() { :; }; log_warn() { :; }; log_error() { exit 1; }
-        SERVER_NAME='metrics.last9.io'
-        $func_body
-        inject_monitoring_tls_server_name
-        grep -n 'serverName' k8s-monitoring-values.yaml
-    "
-    [ "$status" -eq 0 ]
-    # injection still happened despite the unrelated serverName: above
-    [[ "$output" == *"          serverName: metrics.last9.io"* ]]
-    rm -rf "$tmpdir"
-}
-
-# ---------------------------------------------------------------------------
-# update_deployment_environment / activate_deployment_environment_in_values
-# ---------------------------------------------------------------------------
-
-load_deployment_env_helpers() {
-    helm()    { :; }
-    kubectl() { :; }
-    git()     { :; }
-    export -f helm kubectl git
-
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-
-    eval "$(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")"
-    eval "$(awk '/^activate_deployment_environment_in_values\(\)/,/^}/' "$SCRIPT")"
-    eval "$(awk '/^log_error\(\)/,/^}/' "$SCRIPT")"
-    eval "$(awk '/^log_warn\(\)/,/^}/' "$SCRIPT")"
-    eval "$(awk '/^log_info\(\)/,/^}/' "$SCRIPT")"
-    eval "$(awk '/^update_deployment_environment\(\)/,/^}/' "$SCRIPT")"
-}
-
 @test "update_deployment_environment: env=production stamps collector, events, instrumentation" {
     tmpdir=$(mktemp -d)
     cp "$BATS_TEST_DIRNAME/../last9-otel-collector-values.yaml" "$tmpdir/"
@@ -846,7 +743,6 @@ load_deployment_env_helpers() {
 
     run bash -c "
         cd '$tmpdir'
-        $(declare -f load_deployment_env_helpers 2>/dev/null || true)
         helm() { :; }; kubectl() { :; }; git() { :; }
         RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
         $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")

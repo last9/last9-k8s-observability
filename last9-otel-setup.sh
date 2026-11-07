@@ -33,6 +33,7 @@ NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
 COLLECTOR_VERSION="0.165.0"
 MONITORING_VERSION="75.15.1"
+TA_VERSION="0.156.0"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
 DEFAULT_REPO="https://github.com/last9/l9-otel-operator.git"
@@ -42,6 +43,7 @@ ORIGINAL_DIR="$(pwd)"
 AUTH_TOKEN=""
 OTEL_ENDPOINT=""
 MONITORING_ENDPOINT=""
+APP_METRICS_KEEP=""
 REPO_URL="$DEFAULT_REPO"
 UNINSTALL_MODE=false
 FUNCTION_TO_EXECUTE=""
@@ -60,9 +62,6 @@ DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 EXISTING_PROMETHEUS_OPERATOR=""
 EXISTING_PROMETHEUS_OPERATOR_IMAGE=""
-AGENT_STS="prom-agent-last9-k8s-monitoring-kube-prometheus"
-AGENT_RECONCILE_TRIES="${AGENT_RECONCILE_TRIES:-24}"
-AGENT_RECONCILE_INTERVAL="${AGENT_RECONCILE_INTERVAL:-5}"
 SERVER_NAME=""
 
 # Colors for output
@@ -1066,6 +1065,9 @@ parse_arguments() {
             monitoring-endpoint=*)
                 MONITORING_ENDPOINT="${arg#*=}"
                 ;;
+            app-metrics-keep=*)
+                APP_METRICS_KEEP="${arg#*=}"
+                ;;
             repo=*)
                 REPO_URL="${arg#*=}"
                 ;;
@@ -1188,6 +1190,9 @@ show_help() {
     echo "  cluster=CLUSTER_NAME     Set cluster.name attribute for telemetry data"
     echo "                           If not provided, automatically detected from kubectl current-context"
     echo "                           Example: cluster=prod-us-east-1"
+    echo ""
+    echo "  app-metrics-keep=REGEX   Extra metric-name regex kept (in addition to the default allowlist)"
+    echo "                           by the OTel metrics scraper. Example: app-metrics-keep='myapp_.*|http_requests_total'"
     echo ""
     echo "  context=CONTEXT_NAME     Use a specific kubectl context for all operations"
     echo "                           Useful on shared machines with multiple clusters"
@@ -1552,54 +1557,6 @@ inject_collector_tls_server_name() {
     fi
 }
 
-# Inject a TLS serverName under the Prometheus remoteWrite entry of the monitoring
-# values file. Same purpose as inject_collector_tls_server_name, for the metrics path.
-# No-op when SERVER_NAME is empty. Idempotent on re-run.
-inject_monitoring_tls_server_name() {
-    local file="k8s-monitoring-values.yaml"
-
-    [ -z "$SERVER_NAME" ] && return 0
-
-    if [ ! -f "$file" ]; then
-        log_warn "⚠ $file not found, skipping TLS serverName injection"
-        return 0
-    fi
-
-    # Anchor the idempotency guard to the exact 10-space serverName child we emit, so an
-    # unrelated serverName: elsewhere in the values file can't cause a silent skip.
-    if grep -q '^          serverName:' "$file"; then
-        log_info "TLS serverName already present in $file, skipping"
-        return 0
-    fi
-
-    log_info "Injecting remoteWrite tlsConfig.serverName ($SERVER_NAME) into $file..."
-
-    if [ ! -f "$file.backup" ]; then
-        cp "$file" "$file.backup"
-        log_info "Created backup: $file.backup"
-    fi
-
-    # The single remoteWrite "- url:" item is indented 6 spaces; tlsConfig becomes a
-    # sibling (8 spaces) and serverName its child (10 spaces).
-    awk -v sni="$SERVER_NAME" '
-        {
-            print
-            if ($0 ~ /^      - url:/) {
-                print "        tlsConfig:"
-                print "          serverName: " sni
-            }
-        }
-    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-
-    if grep -q "serverName: $SERVER_NAME" "$file"; then
-        log_info "✓ TLS serverName injected into $file"
-    else
-        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
-        [ -f "$file.backup" ] && cp "$file.backup" "$file"
-        rm -f "$file.tmp"
-    fi
-}
-
 # Interactively ask for the deployment environment when run as a dev-tool CLI.
 # Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
 # stays unset there. An explicit env= argument always wins and suppresses the prompt.
@@ -1816,61 +1773,6 @@ update_events_agent_cluster_name() {
     log_info "✓ Events agent cluster name attribute configuration completed"
 }
 
-# Function to update monitoring endpoint in values file
-update_monitoring_endpoint() {
-    log_info "Updating monitoring endpoint placeholder in k8s-monitoring-values.yaml..."
-    
-    # Check if the values file exists
-    if [ ! -f "k8s-monitoring-values.yaml" ]; then
-        log_error "k8s-monitoring-values.yaml not found!"
-    fi
-    
-    # Create backup of original file (if not already created)
-    if [ ! -f "k8s-monitoring-values.yaml.backup" ]; then
-        cp k8s-monitoring-values.yaml k8s-monitoring-values.yaml.backup
-        log_info "Created backup: k8s-monitoring-values.yaml.backup"
-    fi
-    
-    # Replace placeholder with actual endpoint
-    log_info "Using monitoring endpoint: ${MONITORING_ENDPOINT:0:30}..."
-    
-    # Handle multiple placeholder formats
-    if grep -q '{{YOUR_MONITORING_ENDPOINT}}' k8s-monitoring-values.yaml; then
-        log_info "Found {{YOUR_MONITORING_ENDPOINT}} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|{{YOUR_MONITORING_ENDPOINT}}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q '{{MONITORING_ENDPOINT}}' k8s-monitoring-values.yaml; then
-        log_info "Found {{MONITORING_ENDPOINT}} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|{{MONITORING_ENDPOINT}}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q '\${MONITORING_ENDPOINT}' k8s-monitoring-values.yaml; then
-        log_info "Found \${MONITORING_ENDPOINT} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|\${MONITORING_ENDPOINT}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q 'https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write' k8s-monitoring-values.yaml; then
-        log_info "Found old format https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    else
-        log_info "Please use one of these placeholders in your YAML file:"
-        echo "  - {{YOUR_MONITORING_ENDPOINT}}"
-        echo "  - {{MONITORING_ENDPOINT}}"
-        echo "  - \${MONITORING_ENDPOINT}"
-        echo "  - https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write (old format)"
-        log_error "No supported monitoring endpoint placeholder found in the file."
-    fi
-    
-    # Remove the temporary file created by sed -i
-    rm -f k8s-monitoring-values.yaml.tmp
-    
-    # Verify the change was made
-    if grep -q "$MONITORING_ENDPOINT" k8s-monitoring-values.yaml && ! grep -q -E '(\{\{|\$\{).*MONITORING_ENDPOINT.*(\}\}|\})' k8s-monitoring-values.yaml; then
-        log_info "✓ Monitoring endpoint placeholder replaced successfully!"
-    else
-        log_warn "⚠ Could not verify monitoring endpoint replacement. Please check the file manually."
-    fi
-}
-
 # Function to setup Helm repositories
 setup_helm_repos() {
     log_info "Setting up Helm repositories..."
@@ -2056,6 +1958,19 @@ install_operator() {
             --field-manager=helm -f -; then
             log_error "Failed to force-apply opentelemetry-operator CRDs (kubectl apply --server-side --force-conflicts)."
         fi
+
+        # Helm tracks these CRDs in the previous release manifest when the first
+        # install ran with crds.create=true. Upgrading with crds.create=false
+        # drops them from the manifest, so Helm would DELETE them and cascade-
+        # delete every Instrumentation / OpenTelemetryCollector CR. Helm skips
+        # deleting resources whose live object carries resource-policy=keep.
+        local otel_crd
+        while IFS= read -r otel_crd; do
+            [ -n "$otel_crd" ] || continue
+            if ! kubectl annotate crd "${otel_crd##*/}" helm.sh/resource-policy=keep --overwrite; then
+                log_error "Failed to annotate $otel_crd with helm.sh/resource-policy=keep; refusing to install with crds.create=false (Helm would delete the CRD and all its custom resources)."
+            fi
+        done < <(kubectl get crd -o name 2>/dev/null | grep '\.opentelemetry\.io$')
         disable_crds="yes"
     fi
 
@@ -2378,107 +2293,6 @@ detect_existing_prometheus_operator() {
     return 1
 }
 
-# Image tag of the config-reloader the operator stamped into our agent
-# StatefulSet. Each operator writes its own version here, so a change to the
-# external operator's tag is evidence that it (not a previous bundled operator)
-# reconciled the agent. Empty ONLY when the API confirms the StatefulSet does
-# not exist; "unknown" when it exists but the tag can't be read (e.g.
-# digest-pinned) or the API read keeps failing — a failed read must never be
-# mistaken for absence.
-agent_reloader_tag() {
-    local out attempt
-    for attempt in 1 2 3; do
-        if out=$(kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" --ignore-not-found \
-            -o jsonpath='{.metadata.name}{"\t"}{.spec.template.spec.containers[?(@.name=="config-reloader")].image}' 2>/dev/null); then
-            [ -z "$out" ] && return 0
-            local image="${out#*$'\t'}"
-            case "$image" in
-                *@*|"") echo "unknown" ;;
-                *:*) echo "${image##*:}" ;;
-                *) echo "unknown" ;;
-            esac
-            return 0
-        fi
-        [ "$attempt" -lt 3 ] && sleep "$AGENT_RECONCILE_INTERVAL"
-    done
-    echo "unknown"
-}
-
-# Returns 0 when the operator's watch-scope flags provably exclude $NAMESPACE
-# for Prometheus/PrometheusAgent instances. Mirrors prometheus-operator:
-# --prometheus-instance-namespaces overrides --namespaces, and
-# --deny-namespaces only applies when neither allow-list is set.
-operator_excludes_namespace() {
-    local args="$1" allow deny
-    allow=$(printf '%s\n' "$args" | sed -n 's/^--prometheus-instance-namespaces=//p' | head -1)
-    [ -z "$allow" ] && allow=$(printf '%s\n' "$args" | sed -n 's/^--namespaces=//p' | head -1)
-    if [ -n "$allow" ]; then
-        case ",$allow," in *",$NAMESPACE,"*) return 1 ;; esac
-        return 0
-    fi
-    deny=$(printf '%s\n' "$args" | sed -n 's/^--deny-namespaces=//p' | head -1)
-    case ",$deny," in *",$NAMESPACE,"*) return 0 ;; esac
-    return 1
-}
-
-# With the bundled operator disabled, the customer's operator must reconcile
-# our PrometheusAgent. It silently won't if it is scoped to other namespaces
-# or predates PrometheusAgent support (< v0.64). On an upgrade the StatefulSet
-# already exists from the bundled operator, so its presence proves nothing;
-# require the reloader tag to move to the external operator's version.
-#   $1 - agent reloader tag captured before the Helm install ("" = no StatefulSet)
-verify_existing_operator_reconciles_agent() {
-    local prior_tag="$1"
-    local op_ns="${EXISTING_PROMETHEUS_OPERATOR%%/*}" op_name="${EXISTING_PROMETHEUS_OPERATOR#*/}"
-    local args
-    args=$(kubectl get deployment "$op_name" -n "$op_ns" \
-        -o jsonpath='{range .spec.template.spec.containers[*]}{range .args[*]}{@}{"\n"}{end}{end}' 2>/dev/null) || args=""
-
-    if operator_excludes_namespace "$args"; then
-        log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) does not watch namespace '$NAMESPACE'."
-        log_warn "  Its --namespaces / --prometheus-instance-namespaces / --deny-namespaces flags exclude it,"
-        log_warn "  so nothing will reconcile the Last9 PrometheusAgent. Add '$NAMESPACE' to the operator's watched namespaces."
-        return 0
-    fi
-    if printf '%s\n' "$args" | grep -q '^--prometheus-instance-selector='; then
-        log_warn "⚠ The existing operator uses --prometheus-instance-selector; the Last9 PrometheusAgent must match it to be reconciled."
-    fi
-
-    local op_tag=""
-    case "$EXISTING_PROMETHEUS_OPERATOR_IMAGE" in
-        *@*) ;;
-        *:*) op_tag="${EXISTING_PROMETHEUS_OPERATOR_IMAGE##*:}" ;;
-    esac
-
-    if [ -n "$prior_tag" ] && { [ -z "$op_tag" ] || [ "$prior_tag" = "unknown" ] || [ "$prior_tag" = "$op_tag" ]; }; then
-        log_warn "⚠ Could not confirm the existing operator ($EXISTING_PROMETHEUS_OPERATOR) took over the Last9 PrometheusAgent:"
-        log_warn "  the StatefulSet predates this install (or could not be read), so its config-reloader"
-        log_warn "  version can't show which operator reconciled it."
-        log_warn "  Verify with: kubectl logs -n $op_ns deploy/$op_name | grep $NAMESPACE/"
-        return 0
-    fi
-
-    if [ -z "$prior_tag" ]; then
-        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to create StatefulSet $AGENT_STS..."
-    else
-        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to take over StatefulSet $AGENT_STS ($prior_tag -> $op_tag)..."
-    fi
-    local i current
-    for i in $(seq 1 "$AGENT_RECONCILE_TRIES"); do
-        current=$(agent_reloader_tag)
-        if { [ -z "$prior_tag" ] && kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" &>/dev/null; } \
-            || { [ -n "$prior_tag" ] && [ "$current" = "$op_tag" ]; }; then
-            log_info "✓ Existing operator is reconciling the Last9 PrometheusAgent"
-            return 0
-        fi
-        sleep "$AGENT_RECONCILE_INTERVAL"
-    done
-    log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) has not reconciled StatefulSet $AGENT_STS in namespace '$NAMESPACE'."
-    log_warn "  Check that it is v0.64+ and watches '$NAMESPACE':"
-    log_warn "    kubectl get deployment -n $op_ns $op_name -o jsonpath='{.spec.template.spec.containers[0].args}'"
-    log_warn "    kubectl describe prometheusagent -n $NAMESPACE"
-}
-
 # Function to setup Last9 monitoring stack
 setup_last9_monitoring() {
     log_info "Setting up Last9 monitoring stack..."
@@ -2538,33 +2352,9 @@ setup_last9_monitoring() {
     if [ ! -f "k8s-monitoring-values.yaml" ]; then
         log_error "k8s-monitoring-values.yaml not found in current directory"
     fi
-    
-    # Create backup of original file
-    cp k8s-monitoring-values.yaml k8s-monitoring-values.yaml.backup
-    log_info "Created backup: k8s-monitoring-values.yaml.backup"
-    
-    # Replace cluster name placeholder in the values file
-    log_info "Updating cluster name in k8s-monitoring-values.yaml..."
-    log_info "Cluster name to replace: $cluster_name"
-    # Use awk for more robust replacement that handles special characters better
-    awk -v cluster="$cluster_name" '{gsub(/my-cluster-name/, cluster)}1' k8s-monitoring-values.yaml > k8s-monitoring-values.yaml.tmp && mv k8s-monitoring-values.yaml.tmp k8s-monitoring-values.yaml
-    
-    # Note: Using awk instead of sed for cluster name replacement to handle special characters
-    
-    # Verify the change was made
-    if grep -q "cluster: $cluster_name" k8s-monitoring-values.yaml; then
-        log_info "✓ Cluster name placeholder replaced successfully!"
-        log_info "Updated line: $(grep 'cluster:' k8s-monitoring-values.yaml)"
-    else
-        log_warn "⚠ Could not verify cluster name replacement. Please check the file manually."
-        log_warn "Current cluster line: $(grep 'cluster:' k8s-monitoring-values.yaml || echo 'Not found')"
-    fi
-    
-    # Update monitoring endpoint placeholder
-    update_monitoring_endpoint
-
-    # Inject TLS server name override if provided (no-op when unset)
-    inject_monitoring_tls_server_name
+    # The cluster name and endpoint now live only in the OTel scraper values
+    # (rendered by install_metrics_scraper); k8s-monitoring-values.yaml has no
+    # placeholders left and is used as-is.
 
     # Load tolerations if provided (needed for kubectl patching later)
     # NOTE: We skip apply_tolerations_to_monitoring_values() to avoid yq lexer issues
@@ -2582,13 +2372,24 @@ setup_last9_monitoring() {
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo update prometheus-community
 
-    # Detect an existing cluster-wide Prometheus Operator and disable the
-    # bundled one if found, to prevent the two-operator reconciliation conflict.
-    local operator_flag=""
-    local prior_agent_tag=""
-    if detect_existing_prometheus_operator; then
-        operator_flag="--set prometheusOperator.enabled=false"
-        prior_agent_tag=$(agent_reloader_tag)
+    # Detect an existing cluster-wide Prometheus Operator (informational; the bundled
+    # operator is always disabled now that no Prometheus/PrometheusAgent is deployed).
+    detect_existing_prometheus_operator || true
+
+    # A pre-existing last9-k8s-monitoring release means we are migrating an install that
+    # still runs the bundled Prometheus: bring the OTel scraper up first so there is no
+    # gap in metrics, then flip Prometheus off.
+    # Run helm list on its own and check its exit status: a helm/API failure must never be
+    # read as "no release" (that would take the fresh path and flip Prometheus off before verify).
+    local migrating=false release_list
+    local list_err
+    list_err=$(mktemp)
+    if ! release_list=$(helm list -n "$NAMESPACE" --filter "^last9-k8s-monitoring$" -q 2>"$list_err"); then
+        log_error "Could not list Helm releases in namespace $NAMESPACE: $(cat "$list_err"). No Helm releases were changed; fix cluster access and re-run."
+    fi
+    rm -f "$list_err"
+    if printf '%s\n' "$release_list" | grep -qx last9-k8s-monitoring; then
+        migrating=true
     fi
 
     # Adopt any pre-existing Prometheus operator CRDs (monitoring.coreos.com)
@@ -2620,23 +2421,24 @@ setup_last9_monitoring() {
     fi
     adopt_prometheus_crds
 
-    # Install/upgrade the monitoring stack
-    log_info "Installing/upgrading Last9 K8s monitoring stack..."
-    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
-        --version "$MONITORING_VERSION" \
-        -n "$NAMESPACE" \
-        -f k8s-monitoring-values.yaml \
-        --create-namespace \
-        $HELM_SCHEMA_FLAG \
-        $operator_flag \
-        $skip_crds_flag; then
-        log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
-    fi
-
-    log_info "✓ Last9 K8s monitoring stack deployed successfully!"
-
-    if [ -n "$EXISTING_PROMETHEUS_OPERATOR" ]; then
-        verify_existing_operator_reconciles_agent "$prior_agent_tag"
+    local scraper_healthy=true
+    if [ "$migrating" = true ]; then
+        log_info "Existing last9-k8s-monitoring release found: migrating to the OTel metrics scraper"
+        if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
+            if [ -n "$(kubectl get statefulset -n "$NAMESPACE" -l operator.prometheus.io/name -o name 2>/dev/null)" ]; then
+                log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
+            else
+                log_error "OTel metrics scraper did not become healthy and no bundled Prometheus is running, so cluster metrics may not be reaching Last9. Fix the issue above and re-run this script."
+            fi
+        fi
+        install_monitoring_stack "$skip_crds_flag"
+        cleanup_orphaned_kubelet_service
+    else
+        install_monitoring_stack "$skip_crds_flag"
+        if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
+            scraper_healthy=false
+            log_warn "OTel metrics scraper installation/verification failed (see output above). Continuing; fix the issue and re-run this script."
+        fi
     fi
 
     # Patch monitoring components with tolerations and nodeSelector if provided
@@ -2647,21 +2449,256 @@ setup_last9_monitoring() {
 
     # Show the deployed resources
     log_info "Monitoring stack resources in last9 namespace:"
-    kubectl get pods -n last9 -l "app.kubernetes.io/name=prometheus" 2>/dev/null || true
+    kubectl get pods -n last9 -l "app.kubernetes.io/instance=last9-otel-metrics" 2>/dev/null || true
+    kubectl get pods -n last9 -l "app.kubernetes.io/instance=last9-target-allocator" 2>/dev/null || true
     kubectl get pods -n last9 -l "app.kubernetes.io/name=kube-state-metrics" 2>/dev/null || true
     kubectl get pods -n last9 -l "app.kubernetes.io/name=node-exporter" 2>/dev/null || true
     
     log_info "🎉 Last9 monitoring stack setup completed!"
     echo ""
     echo "Summary:"
+    if [ "$scraper_healthy" != true ]; then
+        echo "  ⚠ WARNING: the OTel metrics scraper is NOT verified healthy; no cluster metrics may be reaching Last9. Re-run this script after fixing the errors above."
+    fi
     echo "  ✓ Created secret: last9-remote-write-secret"
-    echo "  ✓ Updated cluster name in k8s-monitoring-values.yaml"
-    echo "  ✓ Deployed kube-prometheus-stack with Last9 configuration"
+    if [ "$scraper_healthy" = true ]; then
+        echo "  ✓ Deployed OTel metrics scraper (collector + target allocator) with cluster name: $cluster_name"
+    else
+        echo "  ✗ OTel metrics scraper deployed but NOT verified (cluster name: $cluster_name)"
+    fi
+    echo "  ✓ Deployed kube-state-metrics and node-exporter (kube-prometheus-stack, Prometheus disabled)"
     echo ""
     echo "To verify the deployment:"
     echo "  kubectl get pods -n last9"
     echo "  kubectl get secrets -n last9 last9-remote-write-secret"
-    echo "  kubectl get prometheus -n last9"
+    echo "  kubectl get pods -n last9 -l app.kubernetes.io/instance=last9-otel-metrics"
+}
+
+# Delete the kubelet Service the old bundled operator created in kube-system (now orphaned and stale).
+# Only our release's exact Service name AND the prometheus-operator managed-by label qualify;
+# a customer operator's Service has a different name and is never touched.
+cleanup_orphaned_kubelet_service() {
+    local svc="last9-k8s-monitoring-kube-kubelet" managed_by
+    managed_by=$(kubectl get service "$svc" -n kube-system --ignore-not-found \
+        -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+    if [ "$managed_by" = "prometheus-operator" ]; then
+        log_info "Deleting orphaned operator-created kubelet Service kube-system/$svc"
+        kubectl delete service "$svc" -n kube-system --ignore-not-found \
+            || log_warn "Could not delete kube-system/$svc (harmless; delete it manually)"
+    fi
+}
+
+# Install/upgrade kube-prometheus-stack with Prometheus, the bundled operator and the kubelet
+# ServiceMonitor disabled via k8s-monitoring-values.yaml (still provides CRDs, kube-state-metrics, node-exporter). $1 = extra skip-crds flag.
+install_monitoring_stack() {
+    log_info "Installing/upgrading Last9 K8s monitoring stack..."
+    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+        --version "$MONITORING_VERSION" \
+        -n "$NAMESPACE" \
+        -f k8s-monitoring-values.yaml \
+        --create-namespace \
+        $HELM_SCHEMA_FLAG \
+        $1; then
+        log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
+    fi
+    log_info "✓ Last9 K8s monitoring stack deployed successfully!"
+}
+
+# Replace every literal occurrence of $2 with $3 in file $1 (no regex/& interpretation).
+replace_literal_in_file() {
+    local file="$1"
+    P="$2" V="$3" awk '{
+        out = ""; line = $0
+        while ((i = index(line, ENVIRON["P"])) > 0) {
+            out = out substr(line, 1, i - 1) ENVIRON["V"]
+            line = substr(line, i + length(ENVIRON["P"]))
+        }
+        print out line
+    }' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+# Install the OTel metrics scraper: standalone Target Allocator, then the StatefulSet collector.
+# $1 = cluster name. Uses MONITORING_ENDPOINT and APP_METRICS_KEEP. Returns non-zero on failure.
+install_metrics_scraper() {
+    local cluster_name="$1"
+    local ta_values="last9-target-allocator-values.yaml"
+    local col_src="last9-otel-metrics-values.yaml"
+    local col_values="last9-otel-metrics-values.rendered.yaml"
+
+    log_info "Installing OTel metrics scraper (Target Allocator + collector)..."
+    if [ -z "$MONITORING_ENDPOINT" ]; then
+        log_warn "Monitoring endpoint is empty; pass monitoring-endpoint=<value>"
+        return 1
+    fi
+    if [ ! -f "$ta_values" ] || [ ! -f "$col_src" ]; then
+        log_warn "$ta_values or $col_src not found in current directory"
+        return 1
+    fi
+
+    # Working copy: never modify the committed values file.
+    # The keep regex lands inside an OTTL double-quoted string within a YAML single-quoted
+    # string: OTTL needs \ and " escaped, YAML needs ' doubled.
+    local keep_alt=""
+    if [ -n "$APP_METRICS_KEEP" ]; then
+        keep_alt="|$(printf '%s' "$APP_METRICS_KEEP" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/'/''/g")"
+    fi
+    cp "$col_src" "$col_values"
+    replace_literal_in_file "$col_values" "{{LAST9_METRICS_ENDPOINT}}" "$MONITORING_ENDPOINT"
+    replace_literal_in_file "$col_values" "{{CLUSTER_NAME}}" "$cluster_name"
+    replace_literal_in_file "$col_values" "{{APP_METRICS_KEEP_ALT}}" "$keep_alt"
+    if [ -n "$SERVER_NAME" ]; then
+        # server-name= keeps its meaning: TLS SNI/verification override on the remote-write exporter.
+        S="$SERVER_NAME" awk '{ print } /^      endpoint: / && !d { print "      tls:"; print "        server_name_override: \"" ENVIRON["S"] "\""; d = 1 }' \
+            "$col_values" > "${col_values}.tmp" && mv "${col_values}.tmp" "$col_values"
+    fi
+
+    # Tolerations/nodeSelector: both charts take them at the values root.
+    local -a scheduling_args=()
+    if [ -n "$TOLERATIONS_FILE" ] && [ -z "$TOLERATIONS_FILE_PATH" ]; then
+        load_tolerations_from_file "$TOLERATIONS_FILE"
+    fi
+    if [ -n "$TOLERATIONS_FILE_PATH" ]; then
+        local arg
+        while IFS= read -r arg; do
+            [ -n "$arg" ] && scheduling_args+=("$arg")
+        done < <({ convert_tolerations_to_helm_set "$TOLERATIONS_FILE_PATH" ""
+                   convert_node_selector_to_helm_set "$TOLERATIONS_FILE_PATH" ""; } | xargs -n1)
+    fi
+
+    if ! helm_upgrade_install_with_retry last9-target-allocator open-telemetry/opentelemetry-target-allocator \
+        --version "$TA_VERSION" \
+        -n "$NAMESPACE" \
+        --create-namespace \
+        -f "$ta_values" \
+        "${scheduling_args[@]}" \
+        $HELM_SCHEMA_FLAG; then
+        log_warn "Helm install/upgrade failed for last9-target-allocator"
+        return 1
+    fi
+
+    # The collector reads the secret via env at start; a credential change must roll the pod.
+    # Only a hash reaches helm/the pod spec, never the credentials.
+    local rw_checksum
+    rw_checksum=$(printf '%s:%s' "$LAST9_USERNAME" "$LAST9_PASSWORD" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)
+
+    if ! helm_upgrade_install_with_retry last9-otel-metrics open-telemetry/opentelemetry-collector \
+        --version "$COLLECTOR_VERSION" \
+        -n "$NAMESPACE" \
+        -f "$col_values" \
+        --set-string "podAnnotations.last9\\.io/rw-credentials-checksum=$rw_checksum" \
+        "${scheduling_args[@]}" \
+        $HELM_SCHEMA_FLAG; then
+        log_warn "Helm install/upgrade failed for last9-otel-metrics"
+        return 1
+    fi
+
+    log_info "✓ OTel metrics scraper installed"
+}
+
+# Wait until the Target Allocator serves the core scrape jobs and the collector exports samples.
+# Returns 0 when healthy, 1 (after warning what is missing) on timeout.
+verify_metrics_scraper() {
+    local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
+    local waited=0 missing configs metrics totals sent failed
+    local prev_sent="" prev_failed=""
+    local ta_proxy="/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy"
+    local col_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy"
+    local pf_dir ta_pid="" col_pid="" ta_port="" col_port=""
+    pf_dir=$(mktemp -d)
+    # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
+    # on a random free local port. Forwards are reused across polls and always killed on return.
+    trap '{ [ -z "$ta_pid" ] || kill "$ta_pid" 2>/dev/null || true; }; { [ -z "$col_pid" ] || kill "$col_pid" 2>/dev/null || true; }; rm -rf "$pf_dir"; trap - RETURN' RETURN
+
+    # $1 = ta|col. Runs in the main shell (state lives in the ta_*/col_* vars): prefers the
+    # apiserver proxy; otherwise (re)starts a port-forward and records its local port.
+    scraper_access() {
+        local who="$1" probe ref rport pid port="" i log="$pf_dir/$1.log"
+        if [ "$who" = ta ]; then
+            probe="$ta_proxy/scrape_configs"; ref="svc/last9-target-allocator-ta"; rport=80; pid=$ta_pid
+        else
+            probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid
+        fi
+        if kubectl get --raw "$probe" >/dev/null 2>&1; then
+            { [ -z "$pid" ] || kill "$pid" 2>/dev/null || true; }
+            pid=""
+        elif [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            : > "$log"
+            kubectl port-forward -n "$NAMESPACE" "$ref" ":$rport" >"$log" 2>&1 &
+            pid=$!
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+                [ -n "$port" ] && break
+                sleep 0.5
+            done
+        else
+            port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+        fi
+        if [ "$who" = ta ]; then ta_pid=$pid; ta_port=$port; else col_pid=$pid; col_port=$port; fi
+    }
+
+    # $1 = ta|col, $2 = path. Pure read (safe in $(...)); non-zero when unreachable.
+    scraper_get() {
+        local who="$1" path="$2" port proxy
+        if [ "$who" = ta ]; then port=$ta_port; proxy=$ta_proxy; else port=$col_port; proxy=$col_proxy; fi
+        if [ -n "$port" ]; then
+            curl -fsS --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null
+        else
+            kubectl get --raw "$proxy$path" 2>/dev/null
+        fi
+    }
+
+    log_info "Verifying OTel metrics scraper (up to ${timeout}s)..."
+    while true; do
+        missing=""
+        scraper_access ta
+        scraper_access col
+        configs=$(scraper_get ta /scrape_configs || true)
+        # Scope to this release's ServiceMonitors (TA job names: serviceMonitor/<ns>/<name>/<n>);
+        # a customer's own KSM/node-exporter ServiceMonitor must not satisfy the check.
+        printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*kube-state-metrics" || missing="$missing target-allocator-job:kube-state-metrics"
+        printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*node-exporter" || missing="$missing target-allocator-job:node-exporter"
+        printf '%s' "$configs" | grep -q '"kubelet"' || missing="$missing target-allocator-job:kubelet"
+        # Job presence is not enough: kubelet discovery must yield at least one target.
+        scraper_get ta /jobs/kubelet/targets 2>/dev/null \
+            | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
+        metrics=$(scraper_get col /metrics || true)
+        # Sum series by name prefix; collector 0.156 may or may not append _total.
+        totals=$(printf '%s\n' "$metrics" | awk '
+            /^#/ { next }
+            { n = $1; sub(/\{.*/, "", n) }
+            n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
+            n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
+            END { print sent + 0, failed + 0 }')
+        sent=${totals% *}; failed=${totals#* }
+        # Judge export health as a delta between consecutive polls: a cumulative failed>0
+        # from an earlier transient blip must not block forever.
+        if [ -z "$prev_sent" ]; then
+            missing="$missing collector-export(need 2 polls)"
+        elif ! awk -v s="$sent" -v ps="$prev_sent" -v f="$failed" -v pf="$prev_failed" 'BEGIN { exit !(s > ps && f <= pf) }'; then
+            missing="$missing collector-export(sent must grow, failed must not)"
+        fi
+        prev_sent=$sent; prev_failed=$failed
+
+        if [ -z "$missing" ]; then
+            log_info "✓ OTel metrics scraper is healthy"
+            return 0
+        fi
+        if [ "$waited" -ge "$timeout" ]; then
+            log_warn "OTel metrics scraper not healthy after ${timeout}s; missing:$missing"
+            return 1
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+}
+
+# Remove the scraper releases (collector first); tolerates releases that are not installed.
+uninstall_metrics_scraper() {
+    local rel
+    for rel in last9-otel-metrics last9-target-allocator; do
+        log_info "Uninstalling $rel..."
+        helm uninstall "$rel" -n "$NAMESPACE" || log_warn "Failed to uninstall $rel (may not be installed)"
+    done
 }
 
 # Function to update auth token in events agent values file
@@ -2794,6 +2831,7 @@ uninstall_last9_monitoring() {
     log_warn "This will remove the Last9 monitoring stack components"
     echo "Components to be removed:"
     echo "  - Helm chart: last9-k8s-monitoring (kube-prometheus-stack)"
+    echo "  - Helm charts: last9-otel-metrics, last9-target-allocator (OTel metrics scraper)"
     echo "  - Secret: last9-remote-write-secret"
     echo "  - Namespace 'last9' (only if empty after cleanup)"
     echo ""
@@ -2813,6 +2851,8 @@ uninstall_last9_monitoring() {
     else
         log_info "Last9 K8s monitoring stack chart not found"
     fi
+
+    uninstall_metrics_scraper
     
     # Remove the secret
     log_info "Removing Last9 remote write secret..."
@@ -3232,6 +3272,20 @@ main() {
                 setup_helm_repos
                 install_events_agent
                 ;;
+            install_metrics_scraper)
+                setup_helm_repos
+                setup_repository
+                if [ -z "$CLUSTER_NAME" ]; then
+                    CLUSTER_NAME=$(sanitize_cluster_name "$(command kubectl config current-context 2>/dev/null || echo unknown-cluster)")
+                fi
+                install_metrics_scraper "$CLUSTER_NAME" || log_error "install_metrics_scraper failed. See output above."
+                ;;
+            verify_metrics_scraper)
+                verify_metrics_scraper || log_error "OTel metrics scraper verification failed."
+                ;;
+            uninstall_metrics_scraper)
+                uninstall_metrics_scraper
+                ;;
             uninstall_last9_monitoring)
                 uninstall_last9_monitoring
                 ;;
@@ -3242,7 +3296,7 @@ main() {
                 uninstall_all
                 ;;
             *)
-                echo "Available functions: setup_helm_repos, install_operator, install_collector, create_collector_service, create_instrumentation, verify_installation, setup_last9_monitoring, install_events_agent, uninstall_last9_monitoring, uninstall_events_agent, uninstall_all"
+                echo "Available functions: install_metrics_scraper, verify_metrics_scraper, uninstall_metrics_scraper, setup_helm_repos, install_operator, install_collector, create_collector_service, create_instrumentation, verify_installation, setup_last9_monitoring, install_events_agent, uninstall_last9_monitoring, uninstall_events_agent, uninstall_all"
                 log_error "Unknown function: $FUNCTION_TO_EXECUTE"
                 ;;
         esac
@@ -3288,7 +3342,7 @@ main() {
         log_info "🎉 Cluster Monitoring installation completed successfully!"
         log_info "Next steps:"
         echo "  1. Wait for monitoring pods to be in Running state: kubectl get pods -n $NAMESPACE"
-        echo "  2. Check Prometheus logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=prometheus"
+        echo "  2. Check scraper logs: kubectl logs -n $NAMESPACE last9-otel-metrics-0"
         echo "  3. Verify monitoring services: kubectl get svc -n $NAMESPACE"
         echo ""
         echo "📝 Note: Monitoring stack deployed with cluster name: $CLUSTER_NAME"
