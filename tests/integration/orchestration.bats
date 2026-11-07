@@ -437,6 +437,33 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     grep -q "pods/last9-otel-metrics-0:9465/proxy/metrics" "$KUBECTL_CALLS_LOG"
 }
 
+@test "verify_metrics_scraper combines scrape health across collector replicas" {
+    export SIMULATE_COLLECTOR_PODS="last9-otel-metrics-0 last9-otel-metrics-1"
+    export SIMULATE_KSM_ON_POD=last9-otel-metrics-1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -eq 0 ]
+    grep -q "pods/last9-otel-metrics-1:9465/proxy/metrics" "$KUBECTL_CALLS_LOG"
+    grep -q "pods/last9-otel-metrics-1:8888/proxy/metrics" "$KUBECTL_CALLS_LOG"
+}
+
+@test "verify_metrics_scraper fails when kube-state-metrics is scraped by no replica" {
+    export SIMULATE_COLLECTOR_PODS="last9-otel-metrics-0"
+    export SIMULATE_KSM_ON_POD=last9-otel-metrics-1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scrape-up:kube-state-metrics"* ]]
+    [[ "$output" != *"scrape-up:node-exporter"* ]]
+}
+
+@test "verify_metrics_scraper fails when no collector pods exist" {
+    export SIMULATE_COLLECTOR_PODS=" "
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collector-pods(0)"* ]]
+}
+
 @test "migration with failing scrapes leaves prometheus running" {
     export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1 SIMULATE_SCRAPES_FAILING=1
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
