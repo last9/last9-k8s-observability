@@ -106,7 +106,7 @@ kubectl get secrets -n last9 last9-remote-write-secret
 
 > **Migrating from the bundled Prometheus**
 >
-> Re-run the same `monitoring-only` command. If a `last9-k8s-monitoring` release already exists, the script first installs the OTel scraper and waits until it is exporting, and only then upgrades `last9-k8s-monitoring` with Prometheus disabled, so there is no gap in metrics. If the scraper does not become healthy, Prometheus is left running untouched and the script exits non-zero; fix the problem and re-run.
+> Re-run the same `monitoring-only` command. If a `last9-k8s-monitoring` release already exists, the script first installs the OTel scraper and waits until it is exporting, and only then upgrades `last9-k8s-monitoring` with Prometheus disabled, so there is no gap in metrics. If the scraper does not become healthy, Prometheus is left running untouched and the script exits non-zero; fix the problem and re-run. During the short verify window the old and new pipelines both write, and the old series carry `prometheus`/`prometheus_replica` labels, so brief duplicate series are expected. kubelet/cAdvisor are now scraped directly by the Target Allocator (the bundled operator that maintained the kubelet Service is gone); the script removes the orphaned operator-created kubelet Service in `kube-system` when it matches this release.
 >
 > **Application metrics:** pass `app-metrics-keep=<regex>` to also forward application metric names matching the regex (alternated into the default allowlist).
 >

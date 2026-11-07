@@ -25,7 +25,9 @@ prometheus-node-exporter:
 
 # Enable cadvisor via kubelet service monitor
 kubelet:
-  enabled: true
+  # Disabled: the kubelet Service/Endpoints are maintained by the Prometheus Operator, which is off.
+  # kubelet/cAdvisor are scraped directly by the Target Allocator (last9-target-allocator-values.yaml).
+  enabled: false
   serviceMonitor:
     interval: 60s
     resource: true  # Enables scraping of cadvisor metrics
@@ -33,6 +35,7 @@ kubelet:
 
 # Disable unnecessary components
 prometheusOperator:
+  enabled: false
   admissionWebhooks:
     enabled: false
   tls:

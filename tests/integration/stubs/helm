@@ -9,6 +9,7 @@
 #   SIMULATE_HELM_REPO_FAILURE      "1" → `helm repo add|update` exits non-zero
 #   SIMULATE_EXISTING_COLLECTOR_RELEASE "1" → `helm list` reports an existing collector release
 #   SIMULATE_EXISTING_MONITORING_RELEASE "1" -> `helm list` reports an existing last9-k8s-monitoring release
+#   SIMULATE_HELM_LIST_FAILURE "1" -> `helm list` exits non-zero
 #   MOCK_HELM_VERSION               version string for `helm version --short` (default v3.14.0)
 
 [ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
@@ -64,6 +65,10 @@ case "$cmd" in
         exit 0
         ;;
     list\ *)
+        if [ "$SIMULATE_HELM_LIST_FAILURE" = "1" ]; then
+            echo "Error: simulated helm list failure" >&2
+            exit 1
+        fi
         if echo "$cmd" | grep -q 'last9-opentelemetry-collector' \
             && [ "$SIMULATE_EXISTING_COLLECTOR_RELEASE" = "1" ]; then
             if echo "$cmd" | grep -q -- '-o json'; then

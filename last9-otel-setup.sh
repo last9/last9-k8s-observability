@@ -62,8 +62,6 @@ DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 EXISTING_PROMETHEUS_OPERATOR=""
 EXISTING_PROMETHEUS_OPERATOR_IMAGE=""
-AGENT_RECONCILE_TRIES="${AGENT_RECONCILE_TRIES:-24}"
-AGENT_RECONCILE_INTERVAL="${AGENT_RECONCILE_INTERVAL:-5}"
 SERVER_NAME=""
 
 # Colors for output
@@ -1559,54 +1557,6 @@ inject_collector_tls_server_name() {
     fi
 }
 
-# Inject a TLS serverName under the Prometheus remoteWrite entry of the monitoring
-# values file. Same purpose as inject_collector_tls_server_name, for the metrics path.
-# No-op when SERVER_NAME is empty. Idempotent on re-run.
-inject_monitoring_tls_server_name() {
-    local file="k8s-monitoring-values.yaml"
-
-    [ -z "$SERVER_NAME" ] && return 0
-
-    if [ ! -f "$file" ]; then
-        log_warn "⚠ $file not found, skipping TLS serverName injection"
-        return 0
-    fi
-
-    # Anchor the idempotency guard to the exact 10-space serverName child we emit, so an
-    # unrelated serverName: elsewhere in the values file can't cause a silent skip.
-    if grep -q '^          serverName:' "$file"; then
-        log_info "TLS serverName already present in $file, skipping"
-        return 0
-    fi
-
-    log_info "Injecting remoteWrite tlsConfig.serverName ($SERVER_NAME) into $file..."
-
-    if [ ! -f "$file.backup" ]; then
-        cp "$file" "$file.backup"
-        log_info "Created backup: $file.backup"
-    fi
-
-    # The single remoteWrite "- url:" item is indented 6 spaces; tlsConfig becomes a
-    # sibling (8 spaces) and serverName its child (10 spaces).
-    awk -v sni="$SERVER_NAME" '
-        {
-            print
-            if ($0 ~ /^      - url:/) {
-                print "        tlsConfig:"
-                print "          serverName: " sni
-            }
-        }
-    ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
-
-    if grep -q "serverName: $SERVER_NAME" "$file"; then
-        log_info "✓ TLS serverName injected into $file"
-    else
-        log_warn "⚠ Could not verify TLS injection in $file, restoring from backup."
-        [ -f "$file.backup" ] && cp "$file.backup" "$file"
-        rm -f "$file.tmp"
-    fi
-}
-
 # Interactively ask for the deployment environment when run as a dev-tool CLI.
 # Only prompts on a real terminal — curl|bash one-liners and CI have no TTY, so it
 # stays unset there. An explicit env= argument always wins and suppresses the prompt.
@@ -1821,61 +1771,6 @@ update_events_agent_cluster_name() {
     fi
 
     log_info "✓ Events agent cluster name attribute configuration completed"
-}
-
-# Function to update monitoring endpoint in values file
-update_monitoring_endpoint() {
-    log_info "Updating monitoring endpoint placeholder in k8s-monitoring-values.yaml..."
-    
-    # Check if the values file exists
-    if [ ! -f "k8s-monitoring-values.yaml" ]; then
-        log_error "k8s-monitoring-values.yaml not found!"
-    fi
-    
-    # Create backup of original file (if not already created)
-    if [ ! -f "k8s-monitoring-values.yaml.backup" ]; then
-        cp k8s-monitoring-values.yaml k8s-monitoring-values.yaml.backup
-        log_info "Created backup: k8s-monitoring-values.yaml.backup"
-    fi
-    
-    # Replace placeholder with actual endpoint
-    log_info "Using monitoring endpoint: ${MONITORING_ENDPOINT:0:30}..."
-    
-    # Handle multiple placeholder formats
-    if grep -q '{{YOUR_MONITORING_ENDPOINT}}' k8s-monitoring-values.yaml; then
-        log_info "Found {{YOUR_MONITORING_ENDPOINT}} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|{{YOUR_MONITORING_ENDPOINT}}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q '{{MONITORING_ENDPOINT}}' k8s-monitoring-values.yaml; then
-        log_info "Found {{MONITORING_ENDPOINT}} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|{{MONITORING_ENDPOINT}}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q '\${MONITORING_ENDPOINT}' k8s-monitoring-values.yaml; then
-        log_info "Found \${MONITORING_ENDPOINT} placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|\${MONITORING_ENDPOINT}|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    elif grep -q 'https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write' k8s-monitoring-values.yaml; then
-        log_info "Found old format https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write placeholder"
-        escaped_endpoint=$(escape_for_sed "$MONITORING_ENDPOINT")
-        sed -i.tmp "s|https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write|$escaped_endpoint|g" k8s-monitoring-values.yaml
-    else
-        log_info "Please use one of these placeholders in your YAML file:"
-        echo "  - {{YOUR_MONITORING_ENDPOINT}}"
-        echo "  - {{MONITORING_ENDPOINT}}"
-        echo "  - \${MONITORING_ENDPOINT}"
-        echo "  - https://app-tsdb.last9.io/v1/metrics/YOUR_CLUSTER_ID/sender/last9/write (old format)"
-        log_error "No supported monitoring endpoint placeholder found in the file."
-    fi
-    
-    # Remove the temporary file created by sed -i
-    rm -f k8s-monitoring-values.yaml.tmp
-    
-    # Verify the change was made
-    if grep -q "$MONITORING_ENDPOINT" k8s-monitoring-values.yaml && ! grep -q -E '(\{\{|\$\{).*MONITORING_ENDPOINT.*(\}\}|\})' k8s-monitoring-values.yaml; then
-        log_info "✓ Monitoring endpoint placeholder replaced successfully!"
-    else
-        log_warn "⚠ Could not verify monitoring endpoint replacement. Please check the file manually."
-    fi
 }
 
 # Function to setup Helm repositories
@@ -2471,8 +2366,13 @@ setup_last9_monitoring() {
     # A pre-existing last9-k8s-monitoring release means we are migrating an install that
     # still runs the bundled Prometheus: bring the OTel scraper up first so there is no
     # gap in metrics, then flip Prometheus off.
-    local migrating=false
-    if _helm_release_exists last9-k8s-monitoring "$NAMESPACE"; then
+    # Run helm list on its own and check its exit status: a helm/API failure must never be
+    # read as "no release" (that would take the fresh path and flip Prometheus off before verify).
+    local migrating=false release_list
+    if ! release_list=$(helm list -n "$NAMESPACE" --filter "^last9-k8s-monitoring$" -q 2>/dev/null); then
+        log_error "Could not list Helm releases in namespace $NAMESPACE (helm/API error). Nothing was changed; fix cluster access and re-run."
+    fi
+    if printf '%s\n' "$release_list" | grep -qx last9-k8s-monitoring; then
         migrating=true
     fi
 
@@ -2505,16 +2405,19 @@ setup_last9_monitoring() {
     fi
     adopt_prometheus_crds
 
+    local scraper_healthy=true
     if [ "$migrating" = true ]; then
         log_info "Existing last9-k8s-monitoring release found: migrating to the OTel metrics scraper"
         if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
             log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
         fi
         install_monitoring_stack "$skip_crds_flag"
+        cleanup_orphaned_kubelet_service
     else
         install_monitoring_stack "$skip_crds_flag"
         if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
-            log_error "OTel metrics scraper installation/verification failed (see output above). Fix the issue and re-run this script."
+            scraper_healthy=false
+            log_warn "OTel metrics scraper installation/verification failed (see output above). Continuing; fix the issue and re-run this script."
         fi
     fi
 
@@ -2534,6 +2437,9 @@ setup_last9_monitoring() {
     log_info "🎉 Last9 monitoring stack setup completed!"
     echo ""
     echo "Summary:"
+    if [ "$scraper_healthy" != true ]; then
+        echo "  ⚠ WARNING: the OTel metrics scraper is NOT verified healthy; no cluster metrics may be reaching Last9. Re-run this script after fixing the errors above."
+    fi
     echo "  ✓ Created secret: last9-remote-write-secret"
     echo "  ✓ Deployed OTel metrics scraper (collector + target allocator) with cluster name: $cluster_name"
     echo "  ✓ Deployed kube-state-metrics and node-exporter (kube-prometheus-stack, Prometheus disabled)"
@@ -2544,8 +2450,22 @@ setup_last9_monitoring() {
     echo "  kubectl get pods -n last9 -l app.kubernetes.io/instance=last9-otel-metrics"
 }
 
-# Install/upgrade kube-prometheus-stack with Prometheus and the bundled operator disabled
-# (it still provides CRDs, kube-state-metrics, node-exporter and ServiceMonitors). $1 = extra skip-crds flag.
+# Delete the kubelet Service the old bundled operator created in kube-system (now orphaned and stale).
+# Only our release's exact Service name AND the prometheus-operator managed-by label qualify;
+# a customer operator's Service has a different name and is never touched.
+cleanup_orphaned_kubelet_service() {
+    local svc="last9-k8s-monitoring-kube-kubelet" managed_by
+    managed_by=$(kubectl get service "$svc" -n kube-system --ignore-not-found \
+        -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}' 2>/dev/null || true)
+    if [ "$managed_by" = "prometheus-operator" ]; then
+        log_info "Deleting orphaned operator-created kubelet Service kube-system/$svc"
+        kubectl delete service "$svc" -n kube-system --ignore-not-found \
+            || log_warn "Could not delete kube-system/$svc (harmless; delete it manually)"
+    fi
+}
+
+# Install/upgrade kube-prometheus-stack with Prometheus, the bundled operator and the kubelet
+# ServiceMonitor disabled via k8s-monitoring-values.yaml (still provides CRDs, kube-state-metrics, node-exporter). $1 = extra skip-crds flag.
 install_monitoring_stack() {
     log_info "Installing/upgrading Last9 K8s monitoring stack..."
     if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
@@ -2554,7 +2474,6 @@ install_monitoring_stack() {
         -f k8s-monitoring-values.yaml \
         --create-namespace \
         $HELM_SCHEMA_FLAG \
-        --set prometheusOperator.enabled=false \
         $1; then
         log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
     fi
@@ -2660,6 +2579,9 @@ verify_metrics_scraper() {
         for job in kube-state-metrics node-exporter kubelet; do
             printf '%s' "$configs" | grep -q "$job" || missing="$missing target-allocator-job:$job"
         done
+        # Job presence is not enough: kubelet discovery must yield at least one target.
+        kubectl get --raw "/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy/jobs/kubelet/targets" 2>/dev/null \
+            | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
         metrics=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy/metrics" 2>/dev/null || true)
         # Sum series by name prefix; collector 0.156 may or may not append _total.
         totals=$(printf '%s\n' "$metrics" | awk '

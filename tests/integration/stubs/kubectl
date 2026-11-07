@@ -10,6 +10,8 @@
 #   SIMULATE_SCRAPER_HEALTHY / SIMULATE_SCRAPER_SEND_FAILED  "1" → healthy scraper endpoints for verify_metrics_scraper
 #   SIMULATE_SCRAPER_FAILED_CONST  "1" -> send_failed counter is non-zero but constant (earlier blip)
 #   (sent counter grows on every metrics poll; send_failed grows too when SIMULATE_SCRAPER_SEND_FAILED=1)
+#   SIMULATE_KUBELET_ZERO_TARGETS  "1" -> TA kubelet job exists but has no targets
+#   SIMULATE_KUBELET_SVC / SIMULATE_KUBELET_SVC_MANAGED_BY  orphaned operator kubelet Service in kube-system
 #   MOCK_CONTEXT            value returned by `config current-context`
 
 # Record the full call (including any --context flag the wrapper injected)
@@ -50,6 +52,20 @@ case "$cmd" in
         ;;
     "get --raw "*"/scrape_configs")
         [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ] && echo '{"kube-state-metrics":{},"node-exporter":{},"kubelet":{}}'
+        exit 0
+        ;;
+    "get --raw "*"/jobs/kubelet/targets")
+        if [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ] && [ "$SIMULATE_KUBELET_ZERO_TARGETS" != "1" ]; then
+            echo '[{"targets":["10.0.0.1:10250"],"labels":{"job":"kubelet"}}]'
+        else
+            echo '[]'
+        fi
+        exit 0
+        ;;
+    "get service last9-k8s-monitoring-kube-kubelet -n kube-system"*)
+        # SIMULATE_KUBELET_SVC=1 -> our operator-created Service exists; managed-by label from
+        # SIMULATE_KUBELET_SVC_MANAGED_BY (default prometheus-operator)
+        [ "$SIMULATE_KUBELET_SVC" = "1" ] && echo "${SIMULATE_KUBELET_SVC_MANAGED_BY:-prometheus-operator}"
         exit 0
         ;;
     "get --raw "*"/proxy/metrics")

@@ -75,13 +75,53 @@ class TargetAllocatorValues(unittest.TestCase):
         self.assertEqual(self.cfg["allocation_strategy"], "consistent-hashing")
 
     def test_ta_carries_ec2_metadata_job(self):
-        jobs = self.cfg["config"]["scrape_configs"]
-        self.assertEqual([j["job_name"] for j in jobs], ["ec2-metadata"])
+        jobs = [j for j in self.cfg["config"]["scrape_configs"] if j["job_name"] == "ec2-metadata"]
+        self.assertEqual(len(jobs), 1)
         want = main_ec2_job()
         for k in ("ec2_sd_configs", "relabel_configs", "scrape_interval", "scrape_timeout"):
             self.assertEqual(jobs[0][k], want[k], k)
         self.assertEqual(jobs[0]["scrape_interval"], "5m")
         self.assertEqual(jobs[0]["scrape_timeout"], "10s")
+
+    def test_ta_kubelet_jobs_match_kps_servicemonitor(self):
+        # Source of truth: kps 75.15.1 kubelet ServiceMonitor rendered from the frozen old values.
+        src = read_fixture().replace("{{YOUR_MONITORING_ENDPOINT}}", "https://x/w")
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(src)
+        try:
+            out = subprocess.run(
+                ["helm", "template", "last9-k8s-monitoring", "prometheus-community/kube-prometheus-stack",
+                 "--version", "75.15.1", "--namespace", "last9", "-f", f.name, "--skip-schema-validation"],
+                check=True, capture_output=True, text=True).stdout
+        finally:
+            os.unlink(f.name)
+        sm = [d for d in yaml.safe_load_all(out) if d and d["kind"] == "ServiceMonitor"
+              and d["metadata"]["name"] == "last9-k8s-monitoring-kube-kubelet"][0]
+        eps = sm["spec"]["endpoints"]
+        jobs = [j for j in self.cfg["config"]["scrape_configs"] if j["job_name"].startswith("kubelet")]
+        self.assertEqual(len(jobs), len(eps))
+        snake = lambda r: {"action": r["action"], "source_labels": r["sourceLabels"], "regex": r["regex"]}
+        for ep, job in zip(eps, jobs):
+            self.assertEqual(job["metrics_path"], ep.get("path", "/metrics"))
+            self.assertEqual(job["scheme"], ep["scheme"])
+            self.assertEqual(job["authorization"]["credentials_file"], ep["bearerTokenFile"])
+            self.assertEqual(job["tls_config"], {"ca_file": ep["tlsConfig"]["caFile"],
+                                                 "insecure_skip_verify": ep["tlsConfig"]["insecureSkipVerify"]})
+            self.assertEqual(job["metric_relabel_configs"], [snake(r) for r in ep.get("metricRelabelings", [])])
+            self.assertEqual(job.get("track_timestamps_staleness", False), ep.get("trackTimestampsStaleness", False))
+            self.assertEqual(job["kubernetes_sd_configs"], [{"role": "node"}])
+            self.assertEqual(job["scrape_interval"], ep["interval"])
+            self.assertIs(job["honor_labels"], True)
+            rel = job["relabel_configs"]
+            static = {r["target_label"]: r["replacement"] for r in rel if "source_labels" not in r}
+            self.assertEqual(static, {"job": "kubelet", "namespace": "kube-system",
+                                      "service": "last9-k8s-monitoring-kube-kubelet",
+                                      "endpoint": ep["port"]})
+            self.assertIn({"source_labels": ["__meta_kubernetes_node_name"], "target_label": "node"}, rel)
+            self.assertIn({"source_labels": ["__metrics_path__"], "target_label": "metrics_path"}, rel)
+        self.assertEqual(jobs[0]["job_name"], "kubelet")
+        self.assertEqual([j["metrics_path"] for j in jobs],
+                         ["/metrics", "/metrics/cadvisor", "/metrics/probes", "/metrics/resource/v1alpha1"])
 
     def test_ta_rbac(self):
         rules = [r for cr in kind(self.docs, "ClusterRole") for r in cr["rules"]]

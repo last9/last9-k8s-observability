@@ -349,15 +349,17 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
 @test "monitoring always disables bundled prometheus operator" {
     run_monitoring_only
     [ "$status" -eq 0 ]
-    grep "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG" | grep -q -- "--set prometheusOperator.enabled=false"
-    grep -q '^  enabled: false' <(awk '/^prometheus:/{f=1;next} /^[^ ]/{f=0} f' "$REPO_ROOT/k8s-monitoring-values.yaml")
+    v="${HELM_CALLS_LOG}.values.last9-k8s-monitoring"
+    for blk in prometheus prometheusOperator kubelet; do
+        awk -v b="$blk:" '$0 == b {f=1; next} /^[^ #]/ {f=0} f' "$v" | grep -q '^  enabled: false'
+    done
 }
 
 @test "monitoring disables prometheus operator with a detected existing operator too" {
     export SIMULATE_EXISTING_CRDS=1
     run_monitoring_only
     [ "$status" -eq 0 ]
-    grep "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG" | grep -q -- "--set prometheusOperator.enabled=false"
+    awk '$0 == "prometheusOperator:" {f=1; next} /^[^ #]/ {f=0} f' "${HELM_CALLS_LOG}.values.last9-k8s-monitoring" | grep -q '^  enabled: false'
 }
 
 @test "migration (existing release) installs scraper before flipping monitoring" {
@@ -384,13 +386,57 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     [ "$kps" -lt "$ta" ] && [ "$ta" -lt "$col" ]
 }
 
-@test "fresh install: verify failure exits non-zero with a clear message" {
+@test "fresh install: verify failure warns, continues, and flags it in the summary" {
     unset SIMULATE_SCRAPER_HEALTHY
-    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[WARN]"* ]]
+    [[ "$output" == *"NOT verified healthy"* ]]
+}
+
+@test "full mode still installs the events agent when fresh-path verify fails" {
+    unset SIMULATE_SCRAPER_HEALTHY
+    run bash "$SCRIPT" token=tok endpoint=https://example.com \
+        monitoring-endpoint="https://mock.last9.io/write" username=u password=p cluster=test-cluster
+    [ "$status" -eq 0 ]
+    grep -q "upgrade --install last9-kube-events-agent" "$HELM_CALLS_LOG"
+}
+
+@test "verify_metrics_scraper fails when kubelet job has zero targets" {
+    export SIMULATE_KUBELET_ZERO_TARGETS=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"kubelet-targets"* ]]
+    grep -q "proxy/jobs/kubelet/targets" "$KUBECTL_CALLS_LOG"
+}
+
+@test "failing helm list aborts without touching anything" {
+    export SIMULATE_HELM_LIST_FAILURE=1
     run_monitoring_only
     [ "$status" -ne 0 ]
-    [[ "$output" == *"[ERROR]"* ]]
-    [[ "$output" == *"verification failed"* ]]
+    ! grep -q "upgrade --install" "$HELM_CALLS_LOG"
+    [[ "$output" == *"Nothing was changed"* ]]
+}
+
+@test "migration deletes our orphaned operator kubelet Service" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_KUBELET_SVC=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    grep -q "delete service last9-k8s-monitoring-kube-kubelet -n kube-system" "$KUBECTL_CALLS_LOG"
+}
+
+@test "migration leaves a Service without the prometheus-operator label alone" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_KUBELET_SVC=1 SIMULATE_KUBELET_SVC_MANAGED_BY=Helm
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    ! grep -q "delete service" "$KUBECTL_CALLS_LOG"
+}
+
+@test "migration never deletes a customer-named kubelet Service" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    ! grep -q "delete service" "$KUBECTL_CALLS_LOG"
 }
 
 @test "verify failure leaves prometheus running" {
@@ -421,13 +467,17 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     export SIMULATE_SCRAPER_HEALTHY=1 VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
     run bash "$SCRIPT" token=tok endpoint=https://example.com \
         monitoring-endpoint="https://mock.last9.io/write" username=u password=p cluster=test-cluster
+    [ "$status" -eq 0 ]
     grep -q "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG"
 }
 
 @test "logs-only, operator-only, events-only never install scraper" {
     run bash "$SCRIPT" logs-only token=tok endpoint=https://example.com
+    [ "$status" -eq 0 ]
     run bash "$SCRIPT" operator-only token=tok endpoint=https://example.com
+    [ "$status" -eq 0 ]
     run bash "$SCRIPT" events-only
+    [ "$status" -eq 0 ]
     ! grep -q "last9-otel-metrics\|last9-target-allocator" "$HELM_CALLS_LOG"
 }
 
