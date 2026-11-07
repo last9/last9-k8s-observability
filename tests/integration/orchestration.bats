@@ -727,3 +727,26 @@ SH
     ! grep -q "annotate crd" "$KUBECTL_CALLS_LOG"
     ! grep -q "crds.create=false" "$HELM_CALLS_LOG"
 }
+
+# ---------------------------------------------------------------------------
+# Legacy GCP-Autopilot/last9-otel-setup.sh clones the repo root and still
+# installs Prometheus, so it must not depend on the root monitoring values.
+# ---------------------------------------------------------------------------
+
+@test "legacy GCP installer monitoring-only installs prometheus monitoring with the endpoint" {
+    run bash "$REPO_ROOT/GCP-Autopilot/last9-otel-setup.sh" monitoring-only cluster=test \
+        monitoring-endpoint="https://mock.last9.io/write" username=testuser password=testpass
+    [ "$status" -eq 0 ]
+    grep -q "upgrade --install last9-k8s-monitoring prometheus-community/kube-prometheus-stack" "$HELM_CALLS_LOG"
+    v="${HELM_CALLS_LOG}.values.last9-k8s-monitoring"
+    grep -q 'url: "https://mock.last9.io/write"' "$v"
+    grep -qE 'cluster: test( |$)' "$v"
+    ! grep -q 'MONITORING_ENDPOINT' "$v"
+}
+
+@test "legacy GCP installer full mode installs prometheus monitoring with the endpoint" {
+    run bash "$REPO_ROOT/GCP-Autopilot/last9-otel-setup.sh" token=tok endpoint=https://example.com cluster=test \
+        monitoring-endpoint="https://mock.last9.io/write" username=testuser password=testpass
+    [ "$status" -eq 0 ]
+    grep -q 'url: "https://mock.last9.io/write"' "${HELM_CALLS_LOG}.values.last9-k8s-monitoring"
+}
