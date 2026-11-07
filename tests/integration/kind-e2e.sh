@@ -77,6 +77,7 @@ cleanup_fixture_release() {
 }
 
 cleanup_cluster() {
+    [ -n "${OLD_DIR:-}" ] && rm -rf "$OLD_DIR"
     # Never delete a user-provided existing cluster; only remove what we seeded
     if [ -n "$EXISTING_CONTEXT" ]; then
         cleanup_fixture_release
@@ -348,16 +349,16 @@ test_existing_operator() {
 
     assert_scraper_installed
 
-    # A fight shows up as repeated StatefulSet template rewrites: watch both
-    # StatefulSets' generations over several reconcile cycles (~17s each).
+    # Neither the Last9 scraper nor the customer Prometheus StatefulSet may be rewritten
+    # (watch generations over several reconcile cycles).
     local gen_l9 gen_cust
     gen_l9=$(kubectl get sts last9-otel-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
     gen_cust=$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')
     sleep 90
     [ "$gen_l9" = "$(kubectl get sts last9-otel-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')" ] \
-        || fail "Last9 PrometheusAgent StatefulSet keeps being rewritten (operator fight)"
+        || fail "Last9 scraper StatefulSet keeps being rewritten"
     [ "$gen_cust" = "$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')" ] \
-        || fail "customer Prometheus StatefulSet keeps being rewritten (operator fight)"
+        || fail "customer Prometheus StatefulSet keeps being rewritten"
 
     kubectl rollout status statefulset/prometheus-prom-kube-prometheus-stack-prometheus \
         -n prometheus --timeout=60s || fail "customer Prometheus not healthy after install"
@@ -380,7 +381,7 @@ test_context() {
 # Migration + customer-operator scenarios
 # ---------------------------------------------------------------------------
 
-OLD_COMMIT="e1ad5c9"   # last commit that still installed the bundled Prometheus
+OLD_COMMIT="e1ad5c9299ea8774ea3999d08791afb8847557aa"   # (e1ad5c9) last commit that still installed the bundled Prometheus
 SINK_NS="l9-sink"
 SINK_RW="http://victoria-metrics.${SINK_NS}.svc:8428/api/v1/write"
 
@@ -436,6 +437,29 @@ run_old_setup() {
     bash "$OLD_DIR/last9-otel-setup.sh" "$@" repo="$OLD_DIR"
 }
 
+monitoring_crd_uids() {
+    kubectl get crd -o jsonpath='{range .items[?(@.spec.group=="monitoring.coreos.com")]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}' | sort
+}
+
+# Poll the VictoriaMetrics sink until the newest sample of metric $1 is newer than epoch $2.
+assert_sink_fresh() {
+    local metric="$1" since="$2" tries=0 ts=""
+    local url="/api/v1/namespaces/$SINK_NS/services/victoria-metrics:8428/proxy/api/v1/query?query=max(timestamp($metric))"
+    while true; do
+        ts=$(kubectl get --raw "$url" 2>/dev/null | python3 -c 'import sys,json
+try:
+    r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else "")
+except Exception: print("")')
+        if [ -n "$ts" ] && [ "$ts" -gt "$since" ]; then
+            info "✓ $metric newest sample ts=$ts (> migration-complete ts=$since)"
+            return 0
+        fi
+        tries=$((tries + 1))
+        [ "$tries" -ge 36 ] && fail "no fresh $metric in the sink after migration (newest ts='${ts}', need > $since)"
+        sleep 5
+    done
+}
+
 # Install with the old script, re-run the working-tree script with identical
 # args, assert the bundled Prometheus is gone and nothing else was disturbed.
 # $1 = cluster suffix, rest = setup args.
@@ -456,8 +480,14 @@ migrate_scenario() {
     kubectl get service last9-k8s-monitoring-kube-kubelet -n kube-system >/dev/null 2>&1 \
         || fail "old install did not create the kube-system kubelet Service"
     info "KSM Deployment UID before re-run: $uid_before"
+    [ -n "$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=prometheus-operator -o name)" ] \
+        || fail "old install has no operator pod (operator-gone check would be vacuous)"
+    local crd_uids_before
+    crd_uids_before=$(monitoring_crd_uids)
+    [ -n "$crd_uids_before" ] || fail "no monitoring.coreos.com CRDs before re-run"
+    info "monitoring.coreos.com CRD UIDs before:"; echo "$crd_uids_before"
 
-    local out
+    local out flip_ts
     out=$(run_setup "$@" monitoring-endpoint="$SINK_RW" username="$DUMMY_USER" password="$DUMMY_PASS" 2>&1) \
         || { echo "$out"; fail "re-run (migration) failed"; }
     echo "$out" | grep -q "migrating to the OTel metrics scraper" \
@@ -465,6 +495,7 @@ migrate_scenario() {
     echo "$out" | grep -q "OTel metrics scraper is healthy" \
         || { echo "$out"; fail "verify_metrics_scraper did not pass"; }
 
+    flip_ts=$(date +%s)
     assert_scraper_installed
     # Garbage collection of the StatefulSet and graceful pod termination are asynchronous.
     local tries=0
@@ -475,8 +506,11 @@ migrate_scenario() {
     done
     [ -z "$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=prometheus-operator -o name)" ] \
         || fail "Prometheus Operator pods remain"
-    kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
-        || fail "servicemonitors CRD vanished"
+    local crd_uids_after
+    crd_uids_after=$(monitoring_crd_uids)
+    info "monitoring.coreos.com CRD UIDs after:"; echo "$crd_uids_after"
+    [ "$crd_uids_before" = "$crd_uids_after" ] \
+        || fail "a monitoring.coreos.com CRD was deleted/recreated (UID changed)"
     local uid_after
     uid_after=$(kubectl get deployment last9-k8s-monitoring-kube-state-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
     info "KSM Deployment UID after re-run:  $uid_after"
@@ -486,6 +520,9 @@ migrate_scenario() {
     kubectl get service last9-k8s-monitoring-kube-kubelet -n kube-system >/dev/null 2>&1 \
         && fail "orphaned kube-system kubelet Service was not deleted"
     info "✓ orphaned kubelet Service deleted"
+    # Data from the new pipeline must keep flowing after Prometheus is gone.
+    assert_sink_fresh kube_pod_info "$flip_ts"
+    assert_sink_fresh container_cpu_usage_seconds_total "$flip_ts"
     info "Pods in $NAMESPACE after migration:"
     kubectl get pods -n "$NAMESPACE" --no-headers
 }
