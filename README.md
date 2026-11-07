@@ -7,7 +7,7 @@ Automated setup script for deploying OpenTelemetry Operator, Collector, Kubernet
 - ✅ **One-command installation** - Deploy everything with a single command
 - ✅ **Flexible deployment options** - Install only what you need (logs, traces, metrics, events)
 - ✅ **Auto-instrumentation** - Automatic instrumentation for Java, Python, Node.js, and more
-- ✅ **Kubernetes monitoring** - Full cluster observability with kube-prometheus-stack
+- ✅ **Kubernetes monitoring** - Full cluster observability: kube-state-metrics, node-exporter and kubelet/cAdvisor metrics scraped by an OpenTelemetry Collector (no Prometheus server or operator installed)
 - ✅ **Events collection** - Capture and forward Kubernetes events
 - ✅ **Cluster identification** - Automatic cluster name detection and attribution
 - ✅ **Tolerations support** - Deploy on tainted nodes (control-plane, spot instances, etc.)
@@ -292,7 +292,7 @@ The following placeholders are automatically replaced during installation:
 ### Uninstall Specific Components
 
 ```bash
-# Uninstall only monitoring stack
+# Uninstall only the monitoring stack (kube-state-metrics, node-exporter, metrics collector and target allocator)
 ./last9-otel-setup.sh uninstall function="uninstall_last9_monitoring"
 
 # Uninstall only events agent
@@ -352,7 +352,7 @@ helm upgrade --install last9-opentelemetry-collector open-telemetry/opentelemetr
 **Configure Last9 Metrics Endpoint:**
 
 Before deploying, update these placeholders in `last9-otel-collector-metrics-values.yaml`:
-- `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 Prometheus remote write URL
+- `{{LAST9_METRICS_ENDPOINT}}` - Your Last9 remote write URL
 - `{{LAST9_METRICS_USERNAME}}` - Your Last9 metrics username
 - `{{LAST9_METRICS_PASSWORD}}` - Your Last9 metrics password
 
