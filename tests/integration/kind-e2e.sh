@@ -21,6 +21,10 @@
 #   context          monitoring-only pinned to an explicit kubectl context
 #   existing-operator  Pre-install a customer kube-prometheus-stack (older operator +
 #                    Prometheus server), then monitoring-only; both must stay healthy
+#   migrate-monitoring-only  Install with the pinned pre-migration script (e1ad5c9), re-run the
+#                    current one, assert Prometheus gone / KSM untouched (needs working sink)
+#   migrate-full     Same, with the full-install path (KNOWN FAILING, not in 'all'; see test_migrate_full)
+#   customer-operator  Customer prometheus-operator v0.81 in 'monitoring' must be untouched
 #   all              Run every mode above, each in its own cluster
 #
 # Env:
@@ -152,6 +156,21 @@ assert_resource_exists() {
     info "✓ $kind/$name exists"
 }
 
+# The OTel scraper (collector StatefulSet + Target Allocator) is up, and the
+# bundled Prometheus is gone: no PrometheusAgent/Prometheus CR and no
+# prometheus-operator Deployment in $NAMESPACE.
+assert_scraper_installed() {
+    assert_rollout statefulset last9-otel-metrics
+    assert_rollout deployment last9-target-allocator-ta
+    [ -z "$(kubectl get prometheusagent,prometheus -n "$NAMESPACE" -o name 2>/dev/null)" ] \
+        || fail "PrometheusAgent/Prometheus resources still exist in $NAMESPACE"
+    if kubectl get deployment -n "$NAMESPACE" -o jsonpath='{.items[*].spec.template.spec.containers[*].image}' \
+        | grep -q "prometheus-operator/prometheus-operator"; then
+        fail "a prometheus-operator Deployment exists in $NAMESPACE"
+    fi
+    info "✓ scraper installed, no PrometheusAgent, no bundled operator"
+}
+
 # ---------------------------------------------------------------------------
 # Per-mode test bodies
 # ---------------------------------------------------------------------------
@@ -174,7 +193,7 @@ test_monitoring_only() {
     create_cluster "${CLUSTER_PREFIX}-monitoring"
     run_setup monitoring-only \
         monitoring-endpoint="$DUMMY_METRICS" username="$DUMMY_USER" password="$DUMMY_PASS"
-    assert_resource_exists prometheusagent last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
     assert_rollout deployment last9-k8s-monitoring-kube-state-metrics
     info "✓ monitoring-only passed"
 }
@@ -201,7 +220,7 @@ test_full_install() {
     assert_rollout deployment opentelemetry-operator
     assert_pods_ready "app.kubernetes.io/name=last9-otel-collector"
     assert_resource_exists instrumentation l9-instrumentation
-    assert_resource_exists prometheusagent last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
     assert_rollout deployment last9-k8s-monitoring-kube-state-metrics
     assert_pods_ready "app.kubernetes.io/name=last9-kube-events-agent"
     info "✓ full-install passed"
@@ -228,7 +247,7 @@ test_crd_conflict() {
 
     echo "$out" | grep -q -- "--skip-crds\|Pre-existing Prometheus CRDs detected" \
         || fail "script did not take the --skip-crds path with pre-existing CRDs"
-    assert_resource_exists prometheusagent last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
     info "✓ crd-conflict passed"
 }
 
@@ -327,22 +346,22 @@ test_existing_operator() {
         fail "a second Prometheus Operator was installed in $NAMESPACE"
     fi
 
-    assert_rollout statefulset prom-agent-last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
 
     # A fight shows up as repeated StatefulSet template rewrites: watch both
     # StatefulSets' generations over several reconcile cycles (~17s each).
     local gen_l9 gen_cust
-    gen_l9=$(kubectl get sts prom-agent-last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
+    gen_l9=$(kubectl get sts last9-otel-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')
     gen_cust=$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')
     sleep 90
-    [ "$gen_l9" = "$(kubectl get sts prom-agent-last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')" ] \
+    [ "$gen_l9" = "$(kubectl get sts last9-otel-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.generation}')" ] \
         || fail "Last9 PrometheusAgent StatefulSet keeps being rewritten (operator fight)"
     [ "$gen_cust" = "$(kubectl get sts prometheus-prom-kube-prometheus-stack-prometheus -n prometheus -o jsonpath='{.metadata.generation}')" ] \
         || fail "customer Prometheus StatefulSet keeps being rewritten (operator fight)"
 
     kubectl rollout status statefulset/prometheus-prom-kube-prometheus-stack-prometheus \
         -n prometheus --timeout=60s || fail "customer Prometheus not healthy after install"
-    assert_rollout statefulset prom-agent-last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
     info "✓ existing-operator passed"
 }
 
@@ -353,8 +372,192 @@ test_context() {
     kubectl config use-context "$ctx" >/dev/null
     run_setup monitoring-only context="$ctx" \
         monitoring-endpoint="$DUMMY_METRICS" username="$DUMMY_USER" password="$DUMMY_PASS"
-    assert_resource_exists prometheusagent last9-k8s-monitoring-kube-prometheus
+    assert_scraper_installed
     info "✓ context passed"
+}
+
+# ---------------------------------------------------------------------------
+# Migration + customer-operator scenarios
+# ---------------------------------------------------------------------------
+
+OLD_COMMIT="e1ad5c9"   # last commit that still installed the bundled Prometheus
+SINK_NS="l9-sink"
+SINK_RW="http://victoria-metrics.${SINK_NS}.svc:8428/api/v1/write"
+
+# Working remote-write sink: verify_metrics_scraper needs sent points to grow
+# without failures, which a dummy endpoint can never satisfy.
+deploy_sink() {
+    info "Deploying VictoriaMetrics sink in $SINK_NS"
+    kubectl create namespace "$SINK_NS" >/dev/null
+    kubectl -n "$SINK_NS" apply -f - <<'YAML' >/dev/null
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: victoria-metrics}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: victoria-metrics}}
+  template:
+    metadata: {labels: {app: victoria-metrics}}
+    spec:
+      containers:
+        - name: vm
+          image: victoriametrics/victoria-metrics:v1.131.0
+          args: ["-retentionPeriod=1d", "-search.latencyOffset=0s"]
+          ports: [{containerPort: 8428}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: victoria-metrics}
+spec:
+  selector: {app: victoria-metrics}
+  ports: [{port: 8428}]
+YAML
+    kubectl -n "$SINK_NS" rollout status deploy/victoria-metrics --timeout="$WAIT_TIMEOUT" \
+        || fail "VictoriaMetrics sink not ready"
+}
+
+# Materialise the pre-migration script AND its values files from the pinned
+# commit (not origin/main, which after merge is the new code) into a throwaway
+# git repo, so the script's own `git clone repo=` picks up the OLD values.
+OLD_DIR=""
+prepare_old_source() {
+    git -C "$REPO_ROOT" cat-file -e "${OLD_COMMIT}^{commit}" 2>/dev/null \
+        || git -C "$REPO_ROOT" fetch --depth=1 origin "$OLD_COMMIT" \
+        || fail "cannot obtain commit $OLD_COMMIT"
+    OLD_DIR=$(mktemp -d)
+    git -C "$REPO_ROOT" archive "$OLD_COMMIT" | tar -x -C "$OLD_DIR"
+    git -C "$OLD_DIR" init -q
+    git -C "$OLD_DIR" add -A
+    git -C "$OLD_DIR" -c user.name=e2e -c user.email=e2e@example.com commit -q -m "old $OLD_COMMIT"
+}
+
+run_old_setup() {
+    info "Running OLD ($OLD_COMMIT) last9-otel-setup.sh $*"
+    bash "$OLD_DIR/last9-otel-setup.sh" "$@" repo="$OLD_DIR"
+}
+
+# Install with the old script, re-run the working-tree script with identical
+# args, assert the bundled Prometheus is gone and nothing else was disturbed.
+# $1 = cluster suffix, rest = setup args.
+migrate_scenario() {
+    local suffix="$1"; shift
+    create_cluster "${CLUSTER_PREFIX}-${suffix}"
+    deploy_sink
+    prepare_old_source
+
+    run_old_setup "$@" monitoring-endpoint="$SINK_RW" username="$DUMMY_USER" password="$DUMMY_PASS" \
+        || fail "old install failed"
+
+    assert_pods_ready "app.kubernetes.io/managed-by=prometheus-operator"
+    [ -n "$(kubectl get prometheusagent -n "$NAMESPACE" -o name)" ] || fail "old install has no PrometheusAgent"
+    assert_rollout deployment last9-k8s-monitoring-kube-state-metrics
+    local uid_before
+    uid_before=$(kubectl get deployment last9-k8s-monitoring-kube-state-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+    kubectl get service last9-k8s-monitoring-kube-kubelet -n kube-system >/dev/null 2>&1 \
+        || fail "old install did not create the kube-system kubelet Service"
+    info "KSM Deployment UID before re-run: $uid_before"
+
+    local out
+    out=$(run_setup "$@" monitoring-endpoint="$SINK_RW" username="$DUMMY_USER" password="$DUMMY_PASS" 2>&1) \
+        || { echo "$out"; fail "re-run (migration) failed"; }
+    echo "$out" | grep -q "migrating to the OTel metrics scraper" \
+        || { echo "$out"; fail "re-run did not take the migration path"; }
+    echo "$out" | grep -q "OTel metrics scraper is healthy" \
+        || { echo "$out"; fail "verify_metrics_scraper did not pass"; }
+
+    assert_scraper_installed
+    # Garbage collection of the StatefulSet and graceful pod termination are asynchronous.
+    local tries=0
+    while [ -n "$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/managed-by=prometheus-operator -o name)" ]; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 60 ] && fail "Prometheus pods remain"
+        sleep 2
+    done
+    [ -z "$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/component=prometheus-operator -o name)" ] \
+        || fail "Prometheus Operator pods remain"
+    kubectl get crd servicemonitors.monitoring.coreos.com >/dev/null 2>&1 \
+        || fail "servicemonitors CRD vanished"
+    local uid_after
+    uid_after=$(kubectl get deployment last9-k8s-monitoring-kube-state-metrics -n "$NAMESPACE" -o jsonpath='{.metadata.uid}')
+    info "KSM Deployment UID after re-run:  $uid_after"
+    [ "$uid_before" = "$uid_after" ] || fail "KSM Deployment was recreated (UID changed)"
+    [ "$(kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=kube-state-metrics -o name | wc -l | tr -d ' ')" = 1 ] \
+        || fail "more than one kube-state-metrics Deployment"
+    kubectl get service last9-k8s-monitoring-kube-kubelet -n kube-system >/dev/null 2>&1 \
+        && fail "orphaned kube-system kubelet Service was not deleted"
+    info "✓ orphaned kubelet Service deleted"
+    info "Pods in $NAMESPACE after migration:"
+    kubectl get pods -n "$NAMESPACE" --no-headers
+}
+
+test_migrate_monitoring_only() {
+    migrate_scenario migrate-monitoring monitoring-only
+    info "✓ migrate-monitoring-only passed"
+}
+
+# KNOWN FAILING, excluded from 'all' and the CI matrix: re-running a full install
+# hits a pre-existing operator-path bug (also present at e1ad5c9) -- the second
+# run's crds.create=false upgrade deletes the OpenTelemetry CRDs, so
+# create_instrumentation fails before monitoring setup is reached.
+test_migrate_full() {
+    migrate_scenario migrate-full token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP"
+    assert_rollout deployment opentelemetry-operator
+    assert_pods_ready "app.kubernetes.io/name=last9-otel-collector"
+    assert_pods_ready "app.kubernetes.io/name=last9-kube-events-agent"
+    info "✓ migrate-full passed"
+}
+
+# A customer's own prometheus-operator (kube-prometheus-stack chart 70.4.2 =
+# operator v0.81.0, with its own CRDs; Prometheus/Alertmanager/Grafana/KSM/
+# node-exporter off so only the operator runs) in namespace `monitoring` must be
+# left byte-identical by a fresh monitoring-only install.
+test_customer_operator() {
+    create_cluster "${CLUSTER_PREFIX}-customer-operator"
+    deploy_sink
+
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1 || true
+    helm repo update prometheus-community >/dev/null
+    helm install cust prometheus-community/kube-prometheus-stack --version 70.4.2 \
+        -n monitoring --create-namespace --wait --timeout 10m \
+        --set prometheus.enabled=false --set alertmanager.enabled=false --set grafana.enabled=false \
+        --set prometheus-node-exporter.enabled=false --set kubeStateMetrics.enabled=false \
+        >/dev/null || fail "could not install customer operator"
+    local op
+    op=$(kubectl get deployment -n monitoring -o name | grep operator | head -1)
+    [ -n "$op" ] || fail "customer operator Deployment not found"
+    local image_before gen_before hash_before crd_before
+    image_before=$(kubectl get "$op" -n monitoring -o jsonpath='{.spec.template.spec.containers[0].image}')
+    gen_before=$(kubectl get "$op" -n monitoring -o jsonpath='{.metadata.generation}')
+    hash_before=$(kubectl get all -n monitoring -o yaml | shasum | cut -d' ' -f1)
+    crd_versions() {
+        kubectl get crd -o jsonpath='{range .items[?(@.spec.group=="monitoring.coreos.com")]}{.metadata.name}{" "}{.metadata.annotations.operator\.prometheus\.io/version}{" "}{.metadata.annotations.controller-gen\.kubebuilder\.io/version}{"\n"}{end}'
+    }
+    crd_before=$(crd_versions)
+    info "customer operator: $op image=$image_before generation=$gen_before"
+    info "CRD versions before:"; echo "$crd_before"
+
+    local out
+    out=$(run_setup monitoring-only \
+        monitoring-endpoint="$SINK_RW" username="$DUMMY_USER" password="$DUMMY_PASS" 2>&1) \
+        || { echo "$out"; fail "monitoring-only failed next to a customer operator"; }
+    echo "$out" | grep -q "Existing Prometheus Operator found" \
+        || { echo "$out"; fail "script did not detect the customer operator"; }
+
+    assert_scraper_installed
+    info "CRD versions after:"; crd_versions
+    [ "$image_before" = "$(kubectl get "$op" -n monitoring -o jsonpath='{.spec.template.spec.containers[0].image}')" ] \
+        || fail "customer operator image changed"
+    [ "$gen_before" = "$(kubectl get "$op" -n monitoring -o jsonpath='{.metadata.generation}')" ] \
+        || fail "customer operator generation changed"
+    [ "$hash_before" = "$(kubectl get all -n monitoring -o yaml | shasum | cut -d' ' -f1)" ] \
+        || fail "objects in namespace monitoring changed"
+    info "waiting for the allocator to list the kubelet job"
+    local tries=0
+    until kubectl get --raw "/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy/scrape_configs" 2>/dev/null | grep -q kubelet; do
+        tries=$((tries + 1)); [ "$tries" -ge 30 ] && fail "allocator does not list the kubelet job"
+        sleep 5
+    done
+    info "✓ customer-operator passed"
 }
 
 # ---------------------------------------------------------------------------
@@ -388,6 +591,9 @@ main() {
         operator-crd-conflict) test_operator_crd_conflict ;;
         context)         test_context ;;
         existing-operator) test_existing_operator ;;
+        migrate-monitoring-only) test_migrate_monitoring_only ;;
+        migrate-full)    test_migrate_full ;;
+        customer-operator) test_customer_operator ;;
         all)
             test_operator_only;          cleanup_cluster
             test_logs_only;              cleanup_cluster
@@ -397,10 +603,12 @@ main() {
             test_crd_conflict;           cleanup_cluster
             test_operator_crd_conflict;  cleanup_cluster
             test_existing_operator;      cleanup_cluster
+            test_migrate_monitoring_only; cleanup_cluster
+            test_customer_operator;      cleanup_cluster
             test_context
             ;;
         *)
-            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|full-install|crd-conflict|operator-crd-conflict|context|all>" >&2
+            echo "Usage: $0 <operator-only|logs-only|monitoring-only|events-only|full-install|crd-conflict|operator-crd-conflict|context|existing-operator|migrate-monitoring-only|migrate-full|customer-operator|all>" >&2
             exit 1
             ;;
     esac
