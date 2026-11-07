@@ -33,7 +33,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: python:3-alpine
+          image: python:3.13-alpine
           imagePullPolicy: IfNotPresent
           command: [python, /app/app.py]
           ports: [{name: metrics, containerPort: 8080}]

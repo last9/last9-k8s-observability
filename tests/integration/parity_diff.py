@@ -9,8 +9,10 @@ import argparse, json, re, sys, time, urllib.parse, urllib.request
 
 # operator-added external labels on the old side + the gate's own marker
 IGNORED = {"pipeline", "prometheus", "prometheus_replica"}
-# label values that must match exactly (informational for the rest)
-STRICT = {"job", "namespace", "service", "endpoint", "metrics_path", "node", "instance", "cluster"}
+# label values that must match exactly (informational for the rest).
+# ponytail: value parity is compared per name across that name's series, not per series; series-count and
+# label-combination diffs are covered by the aggregate queries.
+STRICT = {"job", "namespace", "service", "endpoint", "metrics_path", "node", "instance", "cluster", "le", "quantile"}
 
 
 def num(v):
@@ -66,6 +68,8 @@ def main():
     print("== names only in %s (%d)" % (o.b, len(ob))); [print("  " + n) for n in ob]
     print("== common names: %d" % len(set(A) & set(B)))
     bad |= bool(oa or ob)
+    if not set(A) & set(B):
+        print("GUARD: no common names"); bad = True
 
     print("== label-key diffs")
     nk = 0
@@ -93,7 +97,9 @@ def main():
         print("== queries (%s vs %s)" % (av, bv))
         for q in [l.strip() for l in open(o.queries) if l.strip() and not l.startswith("#")]:
             x, y = qval(o.vm_url, q, ak, av), qval(o.vm_url, q, bk, bv)
-            if x is None or y is None:
+            if not x and not y:
+                rel, ok = None, False  # guard: both sides empty/zero proves nothing
+            elif x is None or y is None:
                 rel, ok = None, False
             else:
                 rel = abs(x - y) / max(abs(x), abs(y), 1e-12) if (x or y) else 0.0

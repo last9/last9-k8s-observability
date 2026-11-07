@@ -18,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-free_gb=$(df -g / | awk 'NR==2{print $4}')
+free_gb=$(( $(df -Pk / | awk 'NR==2{print $4}') / 1048576 ))
 [ "$free_gb" -ge 6 ] || { echo "only ${free_gb}GiB free, need 6"; exit 2; }
 for c in kind helm kubectl docker python3 perl; do command -v $c >/dev/null || { echo "missing $c"; exit 2; }; done
 kind get clusters 2>/dev/null | grep -qx "$CL" && { echo "kind cluster $CL already exists; delete it first"; exit 2; }
@@ -27,7 +27,7 @@ echo "### 1. kind cluster"
 kind create cluster --name "$CL" --wait 120s || exit 2
 
 echo "### 2. VictoriaMetrics"
-K create ns $NS
+K create ns $NS || { echo "cannot create namespace $NS"; exit 2; }
 K -n $NS apply -f - <<'YAML'
 apiVersion: apps/v1
 kind: Deployment
@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
         - name: vm
-          image: victoriametrics/victoria-metrics:latest
+          image: victoriametrics/victoria-metrics:v1.131.0
           args: ["-retentionPeriod=1d", "-search.latencyOffset=0s"]
           ports: [{containerPort: 8428}]
 ---
@@ -53,7 +53,7 @@ spec:
 YAML
 K -n $NS rollout status deploy/victoria-metrics --timeout=300s || exit 2
 VM_RW="http://victoria-metrics.$NS.svc:8428/api/v1/write"
-K -n $NS create secret generic last9-remote-write-secret --from-literal=username=u --from-literal=password=p
+K -n $NS create secret generic last9-remote-write-secret --from-literal=username=u --from-literal=password=p || { echo "cannot create secret"; exit 2; }
 
 echo "### 3. old stack (kube-prometheus-stack 75.15.1)"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null 2>&1
@@ -88,7 +88,7 @@ H install last9-target-allocator open-telemetry/opentelemetry-target-allocator -
 H install last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel.yaml" --wait --timeout 5m || { echo "collector install failed"; exit 2; }
 
 echo "### 5. sample app"
-K create ns parity-app
+K create ns parity-app || { echo "cannot create namespace parity-app"; exit 2; }
 K apply -f "$HERE/fixtures/sample-app.yaml" || exit 2
 K -n parity-app rollout status deploy/parity-app --timeout=300s || exit 2
 
