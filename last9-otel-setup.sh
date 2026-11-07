@@ -961,54 +961,6 @@ patch_monitoring_components_tolerations() {
         fi
     fi
 
-    # Patch PrometheusAgent CRD
-    if [ -n "$tolerations_json" ] || [ -n "$node_selector_json" ]; then
-        log_info "Patching PrometheusAgent CRD..."
-        if kubectl get prometheusagent last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" &>/dev/null; then
-            if [ -n "$tolerations_json" ]; then
-                kubectl patch prometheusagent last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/tolerations\", \"value\": $tolerations_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            if [ -n "$node_selector_json" ]; then
-                kubectl patch prometheusagent last9-k8s-monitoring-kube-prometheus -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/nodeSelector\", \"value\": $node_selector_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            log_info "✓ PrometheusAgent CRD patched"
-        else
-            log_warn "PrometheusAgent CRD not found, skipping"
-        fi
-    fi
-
-    # Patch Prometheus Operator Deployment
-    if [ -n "$tolerations_json" ] || [ -n "$node_selector_json" ]; then
-        log_info "Patching Prometheus Operator Deployment..."
-        if kubectl get deployment last9-k8s-monitoring-kube-prom-operator -n "$NAMESPACE" &>/dev/null; then
-            if [ -n "$tolerations_json" ]; then
-                kubectl patch deployment last9-k8s-monitoring-kube-prom-operator -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $tolerations_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            if [ -n "$node_selector_json" ]; then
-                kubectl patch deployment last9-k8s-monitoring-kube-prom-operator -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/nodeSelector\", \"value\": $node_selector_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            log_info "✓ Prometheus Operator Deployment patched"
-        else
-            log_warn "Prometheus Operator Deployment not found, skipping"
-        fi
-    fi
-
-    # Patch kube-operator Deployment
-    if [ -n "$tolerations_json" ] || [ -n "$node_selector_json" ]; then
-        log_info "Patching kube-operator Deployment..."
-        if kubectl get deployment last9-k8s-monitoring-kube-operator -n "$NAMESPACE" &>/dev/null; then
-            if [ -n "$tolerations_json" ]; then
-                kubectl patch deployment last9-k8s-monitoring-kube-operator -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/tolerations\", \"value\": $tolerations_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            if [ -n "$node_selector_json" ]; then
-                kubectl patch deployment last9-k8s-monitoring-kube-operator -n "$NAMESPACE" --type='json' -p="[{\"op\": \"add\", \"path\": \"/spec/template/spec/nodeSelector\", \"value\": $node_selector_json}]" 2>&1 | grep -v "Warning:" || true
-            fi
-            log_info "✓ kube-operator Deployment patched"
-        else
-            log_warn "kube-operator Deployment not found, skipping"
-        fi
-    fi
-
     # Patch node-exporter DaemonSet with special tolerations
     if [ -n "$node_exporter_tolerations_json" ]; then
         log_info "Patching node-exporter DaemonSet with permissive tolerations..."
@@ -2248,13 +2200,9 @@ create_logs_only_config() {
 }
 
 # Function to detect an existing Prometheus Operator running in the cluster.
-# Returns 0 (found) or 1 (not found).
-#
-# Running two Prometheus Operators with cluster-wide scope causes a
-# reconciliation conflict: both operators continuously overwrite the
-# PrometheusAgent StatefulSet with their own image tags, keeping the pod
-# in a permanent restart loop (PodInitializing → Terminating → repeat).
-# Disabling the bundled operator in Last9's install resolves this.
+# Returns 0 (found) or 1 (not found). Informational only: the bundled operator
+# is always disabled now, so a customer operator no longer conflicts with ours,
+# but the install still upgrades the cluster-scoped CRDs it relies on.
 #
 # Detection matches on the container image, not labels: kube-prometheus-stack
 # labels its operator app.kubernetes.io/name=<nameOverride>-prometheus-operator,
@@ -2282,14 +2230,14 @@ detect_existing_prometheus_operator() {
         local found_ns found_name found_image
         IFS=$'\t' read -r found_ns found_name found_image <<< "$found"
         log_warn "⚠ Existing Prometheus Operator found: deployment '$found_name' in namespace '$found_ns' ($found_image)."
-        log_warn "  Two cluster-wide operators fight over the PrometheusAgent StatefulSet,"
-        log_warn "  keeping the pod in a restart loop. Disabling the bundled operator."
+        log_warn "  Last9 no longer installs its own operator, so it will not conflict;"
+        log_warn "  the cluster-scoped Prometheus CRDs may still be upgraded to the chart's version."
         EXISTING_PROMETHEUS_OPERATOR="$found_ns/$found_name"
         EXISTING_PROMETHEUS_OPERATOR_IMAGE="$found_image"
         return 0
     fi
 
-    log_info "No existing Prometheus Operator found — bundled operator will be installed."
+    log_info "No existing Prometheus Operator found."
     return 1
 }
 
