@@ -282,6 +282,13 @@ run_scraper() {
     grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -q 'tolerations\[0\].key=node-role.kubernetes.io/control-plane'
 }
 
+@test "tolerations-file does not patch the removed PrometheusAgent or bundled operator" {
+    run_monitoring_only tolerations-file="$REPO_ROOT/examples/tolerations-all-nodes.yaml"
+    [ "$status" -eq 0 ]
+    grep -q "patch deployment last9-k8s-monitoring-kube-state-metrics" "$KUBECTL_CALLS_LOG"
+    ! grep -Eq "prometheusagent|kube-prom-operator|last9-k8s-monitoring-kube-operator" "$KUBECTL_CALLS_LOG"
+}
+
 @test "no tolerations-file means no toleration flags on scraper releases" {
     run_scraper
     [ "$status" -eq 0 ]
