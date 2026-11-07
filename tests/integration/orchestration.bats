@@ -282,6 +282,14 @@ run_scraper() {
     grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -q 'tolerations\[0\].key=node-role.kubernetes.io/control-plane'
 }
 
+@test "tolerations-file keeps dotted nodeSelector keys escaped on scraper releases" {
+    printf 'tolerations: []\nnodeSelector:\n  kubernetes.io/os: linux\n' > "$BATS_TEST_TMPDIR/sel.yaml"
+    run_scraper tolerations-file="$BATS_TEST_TMPDIR/sel.yaml"
+    [ "$status" -eq 0 ]
+    grep "upgrade --install last9-target-allocator" "$HELM_CALLS_LOG" | grep -qF 'nodeSelector.kubernetes\.io/os=linux'
+    grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -qF 'nodeSelector.kubernetes\.io/os=linux'
+}
+
 @test "tolerations-file does not patch the removed PrometheusAgent or bundled operator" {
     run_monitoring_only tolerations-file="$REPO_ROOT/examples/tolerations-all-nodes.yaml"
     [ "$status" -eq 0 ]
