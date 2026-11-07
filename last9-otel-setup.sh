@@ -2412,7 +2412,11 @@ setup_last9_monitoring() {
     if [ "$migrating" = true ]; then
         log_info "Existing last9-k8s-monitoring release found: migrating to the OTel metrics scraper"
         if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
-            log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
+            if [ -n "$(kubectl get statefulset -n "$NAMESPACE" -l app.kubernetes.io/name=prometheus -o name 2>/dev/null)" ]; then
+                log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
+            else
+                log_error "OTel metrics scraper did not become healthy and no bundled Prometheus is running, so cluster metrics may not be reaching Last9. Fix the issue above and re-run this script."
+            fi
         fi
         install_monitoring_stack "$skip_crds_flag"
         cleanup_orphaned_kubelet_service
@@ -2444,7 +2448,11 @@ setup_last9_monitoring() {
         echo "  ⚠ WARNING: the OTel metrics scraper is NOT verified healthy; no cluster metrics may be reaching Last9. Re-run this script after fixing the errors above."
     fi
     echo "  ✓ Created secret: last9-remote-write-secret"
-    echo "  ✓ Deployed OTel metrics scraper (collector + target allocator) with cluster name: $cluster_name"
+    if [ "$scraper_healthy" = true ]; then
+        echo "  ✓ Deployed OTel metrics scraper (collector + target allocator) with cluster name: $cluster_name"
+    else
+        echo "  ✗ OTel metrics scraper deployed but NOT verified (cluster name: $cluster_name)"
+    fi
     echo "  ✓ Deployed kube-state-metrics and node-exporter (kube-prometheus-stack, Prometheus disabled)"
     echo ""
     echo "To verify the deployment:"
@@ -2555,10 +2563,16 @@ install_metrics_scraper() {
         return 1
     fi
 
+    # The collector reads the secret via env at start; a credential change must roll the pod.
+    # Only a hash reaches helm/the pod spec, never the credentials.
+    local rw_checksum
+    rw_checksum=$(printf '%s:%s' "$LAST9_USERNAME" "$LAST9_PASSWORD" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)
+
     if ! helm_upgrade_install_with_retry last9-otel-metrics open-telemetry/opentelemetry-collector \
         --version "$COLLECTOR_VERSION" \
         -n "$NAMESPACE" \
         -f "$col_values" \
+        --set-string "podAnnotations.last9\\.io/rw-credentials-checksum=$rw_checksum" \
         "${scheduling_args[@]}" \
         $HELM_SCHEMA_FLAG; then
         log_warn "Helm install/upgrade failed for last9-otel-metrics"
@@ -2572,20 +2586,69 @@ install_metrics_scraper() {
 # Returns 0 when healthy, 1 (after warning what is missing) on timeout.
 verify_metrics_scraper() {
     local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
-    local waited=0 missing job configs metrics totals sent failed
+    local waited=0 missing configs metrics totals sent failed
     local prev_sent="" prev_failed=""
+    local ta_proxy="/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy"
+    local col_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy"
+    local pf_dir ta_pid="" col_pid="" ta_port="" col_port=""
+    pf_dir=$(mktemp -d)
+    # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
+    # on a random free local port. Forwards are reused across polls and always killed on return.
+    trap '[ -n "$ta_pid" ] && kill "$ta_pid" 2>/dev/null; [ -n "$col_pid" ] && kill "$col_pid" 2>/dev/null; rm -rf "$pf_dir"; trap - RETURN' RETURN
+
+    # $1 = ta|col. Runs in the main shell (state lives in the ta_*/col_* vars): prefers the
+    # apiserver proxy; otherwise (re)starts a port-forward and records its local port.
+    scraper_access() {
+        local who="$1" probe ref rport pid port="" i log="$pf_dir/$1.log"
+        if [ "$who" = ta ]; then
+            probe="$ta_proxy/scrape_configs"; ref="svc/last9-target-allocator-ta"; rport=80; pid=$ta_pid
+        else
+            probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid
+        fi
+        if kubectl get --raw "$probe" >/dev/null 2>&1; then
+            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            pid=""
+        elif [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            : > "$log"
+            kubectl port-forward -n "$NAMESPACE" "$ref" ":$rport" >"$log" 2>&1 &
+            pid=$!
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+                port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+                [ -n "$port" ] && break
+                sleep 0.5
+            done
+        else
+            port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
+        fi
+        if [ "$who" = ta ]; then ta_pid=$pid; ta_port=$port; else col_pid=$pid; col_port=$port; fi
+    }
+
+    # $1 = ta|col, $2 = path. Pure read (safe in $(...)); non-zero when unreachable.
+    scraper_get() {
+        local who="$1" path="$2" port proxy
+        if [ "$who" = ta ]; then port=$ta_port; proxy=$ta_proxy; else port=$col_port; proxy=$col_proxy; fi
+        if [ -n "$port" ]; then
+            curl -fsS --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null
+        else
+            kubectl get --raw "$proxy$path" 2>/dev/null
+        fi
+    }
 
     log_info "Verifying OTel metrics scraper (up to ${timeout}s)..."
     while true; do
         missing=""
-        configs=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy/scrape_configs" 2>/dev/null || true)
-        for job in kube-state-metrics node-exporter kubelet; do
-            printf '%s' "$configs" | grep -q "$job" || missing="$missing target-allocator-job:$job"
-        done
+        scraper_access ta
+        scraper_access col
+        configs=$(scraper_get ta /scrape_configs || true)
+        # Scope to this release's ServiceMonitors (TA job names: serviceMonitor/<ns>/<name>/<n>);
+        # a customer's own KSM/node-exporter ServiceMonitor must not satisfy the check.
+        printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*kube-state-metrics" || missing="$missing target-allocator-job:kube-state-metrics"
+        printf '%s' "$configs" | grep -q "serviceMonitor/$NAMESPACE/[^\"]*node-exporter" || missing="$missing target-allocator-job:node-exporter"
+        printf '%s' "$configs" | grep -q '"kubelet"' || missing="$missing target-allocator-job:kubelet"
         # Job presence is not enough: kubelet discovery must yield at least one target.
-        kubectl get --raw "/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy/jobs/kubelet/targets" 2>/dev/null \
+        scraper_get ta /jobs/kubelet/targets 2>/dev/null \
             | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
-        metrics=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy/metrics" 2>/dev/null || true)
+        metrics=$(scraper_get col /metrics || true)
         # Sum series by name prefix; collector 0.156 may or may not append _total.
         totals=$(printf '%s\n' "$metrics" | awk '
             /^#/ { next }

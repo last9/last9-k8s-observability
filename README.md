@@ -114,6 +114,14 @@ kubectl get secrets -n last9 last9-remote-write-secret
 >
 > **EC2 / IRSA:** the `ec2-metadata` job's IAM role annotation (`eks.amazonaws.com/role-arn`) now goes on the `last9-target-allocator` service account (in `last9-target-allocator-values.yaml`), not on a Prometheus service account. Pod Identity needs no annotation.
 >
+> **Unsupported: secret-based scrape auth.** ServiceMonitors/PodMonitors that reference Secrets (`basicAuth`, bearer token secret, OAuth2) are not supported by the OTel scraper: the Target Allocator only serves secret values over mTLS and otherwise redacts them, so those targets fail to authenticate.
+>
+> **Sizing:** the metrics collector (`last9-otel-metrics`) defaults to 1 replica with the resources in `last9-otel-metrics-values.yaml`. On large clusters raise `replicaCount` (the Target Allocator uses consistent hashing, so targets spread across replicas) and the memory limit. Memory has not been benchmarked per cluster size; measure it on your cluster before settling on numbers.
+>
+> **Credential rotation:** re-run the script with the new `username`/`password`; a checksum pod annotation makes the collector restart and pick up the new credentials.
+>
+> **Private clusters:** verification first uses the API-server proxy and falls back to `kubectl port-forward` if the proxy is blocked.
+>
 > **ArgoCD / GitOps:** manage `last9-target-allocator` and `last9-otel-metrics` as separate Applications, sync the target allocator first, then the collector, and only then sync `last9-k8s-monitoring` with `prometheus.enabled: false`. Do not sync the `k8s-monitoring-values.yaml` change before the scraper is healthy.
 
 > **Pre-existing Prometheus CRDs (Terraform / prior Helm installs)**

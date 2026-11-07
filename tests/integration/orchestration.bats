@@ -442,13 +442,90 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
 
 @test "verify failure leaves prometheus running" {
     unset SIMULATE_SCRAPER_HEALTHY
-    export SIMULATE_EXISTING_MONITORING_RELEASE=1
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
     run_monitoring_only
     [ "$status" -ne 0 ]
     ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
     [[ "$output" == *"still running"* ]]
     [[ "$output" == *"re-run"* ]]
+}
+
+@test "verify failure on an already-migrated cluster does not claim Prometheus is running" {
+    unset SIMULATE_SCRAPER_HEALTHY
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"still running"* ]]
+    [[ "$output" == *"no bundled Prometheus is running"* ]]
+}
+
+@test "fresh-path verify failure prints deployed-but-not-verified, not a success line" {
+    unset SIMULATE_SCRAPER_HEALTHY
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deployed but NOT verified"* ]]
+    [[ "$output" != *"✓ Deployed OTel metrics scraper"* ]]
+}
+
+@test "fresh-path verify success prints the deployed line" {
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"✓ Deployed OTel metrics scraper"* ]]
+}
+
+@test "verify_metrics_scraper ignores a customer's own kube-state-metrics/node-exporter ServiceMonitor" {
+    export SIMULATE_SCRAPE_CONFIGS='{"serviceMonitor/monitoring/acme-kube-state-metrics/0":{},"serviceMonitor/monitoring/acme-prometheus-node-exporter/0":{},"kubelet":{}}'
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"target-allocator-job:kube-state-metrics"* ]]
+    [[ "$output" == *"target-allocator-job:node-exporter"* ]]
+}
+
+@test "verify_metrics_scraper falls back to kubectl port-forward when the apiserver proxy is blocked" {
+    export SIMULATE_PROXY_BLOCKED=1
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cat > "$BATS_TEST_TMPDIR/bin/curl" <<'SH'
+#!/usr/bin/env bash
+url="${@: -1}"
+echo "$url" >> "$CURL_LOG"
+case "$url" in
+    http://127.0.0.1:11111/scrape_configs)
+        echo '{"serviceMonitor/last9/x-kube-state-metrics/0":{},"serviceMonitor/last9/x-prometheus-node-exporter/0":{},"kubelet":{}}' ;;
+    http://127.0.0.1:11111/jobs/kubelet/targets)
+        echo '[{"targets":["10.0.0.1:10250"]}]' ;;
+    http://127.0.0.1:22222/metrics)
+        n=$(cat "$CURL_LOG.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$CURL_LOG.n"
+        echo "otelcol_exporter_sent_metric_points_total{exporter=\"x\"} $((n * 100))" ;;
+    *) exit 22 ;;
+esac
+SH
+    chmod +x "$BATS_TEST_TMPDIR/bin/curl"
+    export PATH="$BATS_TEST_TMPDIR/bin:$PATH" CURL_LOG="$BATS_TEST_TMPDIR/curl.log"
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -eq 0 ]
+    grep -q "port-forward -n last9 svc/last9-target-allocator-ta :80" "$KUBECTL_CALLS_LOG"
+    grep -q "port-forward -n last9 pod/last9-otel-metrics-0 :8888" "$KUBECTL_CALLS_LOG"
+    grep -q "127.0.0.1:11111/scrape_configs" "$CURL_LOG"
+    # one forward per target, reused across polls; none left running
+    [ "$(grep -c 'port-forward.*svc/' "$KUBECTL_CALLS_LOG")" -eq 1 ]
+}
+
+@test "install_metrics_scraper annotates the collector with a credentials checksum that tracks the password" {
+    run_scraper username=u password=pw1
+    [ "$status" -eq 0 ]
+    a1=$(grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -o 'rw-credentials-checksum=[0-9a-f]*')
+    : > "$HELM_CALLS_LOG"
+    run_scraper username=u password=pw2
+    a2=$(grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -o 'rw-credentials-checksum=[0-9a-f]*')
+    : > "$HELM_CALLS_LOG"
+    run_scraper username=u password=pw1
+    a3=$(grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -o 'rw-credentials-checksum=[0-9a-f]*')
+    [ -n "$a1" ] && [ "$a1" != "$a2" ] && [ "$a1" = "$a3" ]
+    ! grep -q "pw1\|pw2" "$HELM_CALLS_LOG"
+    grep -q 'podAnnotations.last9\\.io/rw-credentials-checksum' <<<"$(grep 'upgrade --install last9-otel-metrics' "$HELM_CALLS_LOG")"
 }
 
 @test "re-run after verify failure completes migration" {

@@ -7,28 +7,8 @@
 # labelled app.kubernetes.io/instance: last9-otel-metrics.
 fullnameOverride: last9-target-allocator
 
-# Secrets read access: ServiceMonitor/PodMonitor basicAuth/bearer secrets (the old Prometheus Operator read them too).
-extraObjects:
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: ClusterRole
-    metadata:
-      name: last9-target-allocator-secrets
-    rules:
-      - apiGroups: [""]
-        resources: [secrets]
-        verbs: [get, list, watch]
-  - apiVersion: rbac.authorization.k8s.io/v1
-    kind: ClusterRoleBinding
-    metadata:
-      name: last9-target-allocator-secrets
-    roleRef:
-      apiGroup: rbac.authorization.k8s.io
-      kind: ClusterRole
-      name: last9-target-allocator-secrets
-    subjects:
-      - kind: ServiceAccount
-        name: last9-target-allocator-ta
-        namespace: last9
+# Note: ServiceMonitors/PodMonitors that reference Secrets (basicAuth, bearer token, OAuth2) are not
+# supported: the Target Allocator only serves secret values over mTLS, otherwise they are redacted.
 
 targetAllocator:
   serviceAccount:
@@ -133,7 +113,7 @@ targetAllocator:
           scrape_interval: 5m
           scrape_timeout: 10s
           ec2_sd_configs:
-            - region: "REPLACE_WITH_AWS_REGION"   # set your region, e.g. us-east-1. NO {{ }}: the chart tpl-renders additionalScrapeConfigs, so Go-template braces fail to parse.
+            - region: "REPLACE_WITH_AWS_REGION"   # set your region, e.g. us-east-1. edit this file directly; it is passed to helm as-is, so no {{ }} placeholder is substituted.
               port: 9                  # discard port: scrape fails fast (up=0); avoids node-exporter double-scrape
               refresh_interval: 5m
               # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
@@ -144,9 +124,8 @@ targetAllocator:
               filters:
                 - name: instance-state-name
                   values: [ running ]
-          # NOTE: additionalScrapeConfigs is raw Prometheus config → snake_case
-          # (relabel_configs / metric_relabel_configs / source_labels / target_label),
-          # unlike remoteWrite.writeRelabelConfigs above which is the operator CRD camelCase form.
+          # NOTE: scrape_configs here is raw Prometheus config → snake_case
+          # (relabel_configs / metric_relabel_configs / source_labels / target_label).
           relabel_configs:
             - source_labels: [__meta_ec2_private_ip]
               target_label: internal_ip

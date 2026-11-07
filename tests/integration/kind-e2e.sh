@@ -460,6 +460,26 @@ except Exception: print("")')
     done
 }
 
+# Poll the sink until count(count by (service) (metric $1)) == $2 (data must exist: 0 never passes).
+assert_sink_service_count() {
+    local metric="$1" want="$2" tries=0 n=""
+    local q="count(count%20by%20(service)%20($metric))"
+    local url="/api/v1/namespaces/$SINK_NS/services/victoria-metrics:8428/proxy/api/v1/query?query=$q"
+    while true; do
+        n=$(kubectl get --raw "$url" 2>/dev/null | python3 -c 'import sys,json
+try:
+    r=json.load(sys.stdin)["data"]["result"]; print(int(float(r[0]["value"][1])) if r else "")
+except Exception: print("")')
+        if [ "$n" = "$want" ]; then
+            info "✓ count by (service) of $metric == $want"
+            return 0
+        fi
+        tries=$((tries + 1))
+        [ "$tries" -ge 60 ] && fail "count by (service) of $metric is '${n}', want $want (duplicate kubelet series or no data)"
+        sleep 5
+    done
+}
+
 # Install with the old script, re-run the working-tree script with identical
 # args, assert the bundled Prometheus is gone and nothing else was disturbed.
 # $1 = cluster suffix, rest = setup args.
@@ -594,6 +614,12 @@ test_customer_operator() {
         tries=$((tries + 1)); [ "$tries" -ge 30 ] && fail "allocator does not list the kubelet job"
         sleep 5
     done
+    # The customer's kubelet ServiceMonitor targets the same kubelets as our static jobs; the
+    # collector must drop its datapoints, leaving exactly one `service` value per series.
+    info "asserting no duplicate kubelet series (one service label on container_cpu_usage_seconds_total)"
+    assert_sink_service_count container_cpu_usage_seconds_total 1
+    sleep 120
+    assert_sink_service_count container_cpu_usage_seconds_total 1
     info "✓ customer-operator passed"
 }
 

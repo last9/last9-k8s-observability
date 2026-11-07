@@ -5,12 +5,14 @@ Render-level tests for the OTel metrics scraper Helm values.
 Run: uv run --with pyyaml python3 -m unittest tests/test_metrics_scraper_values.py -v
 """
 
+import http.server
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 
@@ -136,11 +138,9 @@ class TargetAllocatorValues(unittest.TestCase):
         for res in ("pods", "services", "endpoints", "nodes", "namespaces"):
             self.assertTrue(granted("", res), res)
         self.assertTrue(granted("discovery.k8s.io", "endpointslices"))
-        self.assertTrue(granted("", "secrets"))
-        crbs = [b for b in kind(self.docs, "ClusterRoleBinding")
-                if b["roleRef"]["name"] == "last9-target-allocator-secrets"]
-        sa = [d["metadata"]["name"] for d in kind(self.docs, "ServiceAccount")]
-        self.assertEqual([s["name"] for b in crbs for s in b["subjects"]], sa)
+        # secret values are redacted by the TA without mTLS, so no secrets access is granted
+        self.assertFalse(granted("", "secrets"))
+        self.assertEqual([d for d in kind(self.docs, "ClusterRole") if "secrets" in d["metadata"]["name"]], [])
 
     def test_ta_service_name(self):
         # chart hardcodes the "-ta" suffix on the Service name (<fullname>-ta)
@@ -220,7 +220,7 @@ class MetricsCollectorValues(unittest.TestCase):
         self.assertEqual(list(p), ["metrics"])
         self.assertEqual(p["metrics"], {
             "receivers": ["prometheus"],
-            "processors": ["memory_limiter", "filter/last9_keep", "batch"],
+            "processors": ["memory_limiter", "filter/last9_keep", "filter/last9_kubelet_dedup", "batch"],
             "exporters": ["prometheusremotewrite/last9"],
         })
 
@@ -241,8 +241,8 @@ class MetricsCollectorValues(unittest.TestCase):
 
     def test_kubelet_scrape_rbac(self):
         rules = [r for cr in kind(self.docs, "ClusterRole") for r in cr["rules"]]
-        for res in ("nodes/metrics", "nodes/proxy"):
-            self.assertTrue(any(res in r.get("resources", []) and "get" in r["verbs"] for r in rules), res)
+        self.assertTrue(any("nodes/metrics" in r.get("resources", []) and "get" in r["verbs"] for r in rules))
+        self.assertFalse(any("nodes/proxy" in r.get("resources", []) for r in rules))
         sas = [d for d in kind(self.docs, "ServiceAccount")]
         self.assertTrue(sas)
         sts = kind(self.docs, "StatefulSet")[0]
@@ -339,6 +339,90 @@ class MetricsCollectorContainer(unittest.TestCase):
         self.assertEqual(self._survivors(""), {"kube_pod_info", "node_cpu_seconds_total"})
         self.assertEqual(self._survivors("|my_app_.*"),
                          {"kube_pod_info", "node_cpu_seconds_total", "my_app_requests_total"})
+
+    def test_kubelet_dedup_semantics(self):
+        # Real prometheus receiver scraping a host HTTP target: proves job->service.name and
+        # label `service`->datapoint attribute, and that the dedup filter keys on them correctly.
+        vals = filled_values()
+        try:
+            flt = collector_config(render(COL_CHART, COL_VERSION, vals, release="x"))["processors"]["filter/last9_kubelet_dedup"]
+        finally:
+            os.unlink(vals)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"# TYPE probe_metric gauge\nprobe_metric 1\n"
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("0.0.0.0", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        target = f"host.docker.internal:{srv.server_address[1]}"
+
+        def job(name, job, service):
+            return {"job_name": name, "scrape_interval": "1s", "static_configs": [{"targets": [target]}],
+                    "relabel_configs": [{"target_label": "job", "replacement": job},
+                                        {"target_label": "service", "replacement": service}]}
+
+        cfg = {
+            "receivers": {"prometheus": {"config": {"scrape_configs": [
+                job("a", "kubelet", "last9-k8s-monitoring-kube-kubelet"),
+                job("b", "kubelet", "other-kube-prometheus-stack-kubelet"),
+                job("c", "app", "other-kube-prometheus-stack-kubelet"),
+            ]}}},
+            "processors": {"filter/last9_kubelet_dedup": flt},
+            "exporters": {"file": {"path": "/out/out.json"}},
+            "service": {"pipelines": {"metrics": {"receivers": ["prometheus"],
+                                                  "processors": ["filter/last9_kubelet_dedup"],
+                                                  "exporters": ["file"]}}},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/out"); os.chmod(f"{d}/out", 0o777)
+            with open(f"{d}/config.yaml", "w") as f:
+                yaml.safe_dump(cfg, f)
+            name = f"l9-dedup-test-{os.getpid()}-{int(time.time())}"
+            subprocess.run(["docker", "run", "-d", "--name", name, "--add-host", "host.docker.internal:host-gateway",
+                            "-v", f"{d}:/c", "-v", f"{d}/out:/out", COL_IMAGE, "--config=/c/config.yaml"],
+                           check=True, capture_output=True)
+            got = set()
+            try:
+                for _ in range(40):
+                    time.sleep(1)
+                    p = f"{d}/out/out.json"
+                    got = set()
+                    if os.path.exists(p):
+                        with open(p) as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                try:
+                                    doc = json.loads(line)
+                                except ValueError:
+                                    continue  # file exporter mid-write
+                                for rm in doc["resourceMetrics"]:
+                                    res = {a["key"]: a["value"].get("stringValue") for a in rm["resource"]["attributes"]}
+                                    for sm in rm["scopeMetrics"]:
+                                        for m in sm["metrics"]:
+                                            if m["name"] != "probe_metric":
+                                                continue
+                                            for dp in m["gauge"]["dataPoints"]:
+                                                at = {a["key"]: a["value"].get("stringValue") for a in dp["attributes"]}
+                                                got.add((res.get("service.name"), at.get("service")))
+                    # job "c" and the kept kubelet series both present => at least one full scrape cycle
+                    if ("app", "other-kube-prometheus-stack-kubelet") in got and \
+                            ("kubelet", "last9-k8s-monitoring-kube-kubelet") in got:
+                        time.sleep(3)
+                        break
+                logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+            finally:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+                srv.shutdown()
+        self.assertEqual(
+            got, {("kubelet", "last9-k8s-monitoring-kube-kubelet"), ("app", "other-kube-prometheus-stack-kubelet")},
+            logs.stdout[-2000:] + logs.stderr[-2000:])
 
 
 if __name__ == "__main__":
