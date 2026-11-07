@@ -5,6 +5,7 @@ Render-level tests for the OTel metrics scraper Helm values.
 Run: uv run --with pyyaml python3 -m unittest tests/test_metrics_scraper_values.py -v
 """
 
+import contextlib
 import http.server
 import json
 import os
@@ -257,6 +258,15 @@ ENV = ["-e", "MY_POD_IP=127.0.0.1", "-e", "POD_NAME=t-0", "-e", "LAST9_RW_USERNA
 HAVE_DOCKER = shutil.which("docker") is not None
 
 
+@contextlib.contextmanager
+def mount_dir():
+    """Temp dir for bind-mounting into the collector, which runs as a non-root uid (10001):
+    TemporaryDirectory is 0700, so open it up or the container cannot read its config."""
+    with tempfile.TemporaryDirectory() as d:
+        os.chmod(d, 0o755)
+        yield d
+
+
 @unittest.skipUnless(HAVE_DOCKER, "docker not available")
 class MetricsCollectorContainer(unittest.TestCase):
     def test_config_validates(self):
@@ -265,7 +275,7 @@ class MetricsCollectorContainer(unittest.TestCase):
             cfg = collector_config(render(COL_CHART, COL_VERSION, vals, release="last9-otel-metrics"))
         finally:
             os.unlink(vals)
-        with tempfile.TemporaryDirectory() as d:
+        with mount_dir() as d:
             with open(os.path.join(d, "config.yaml"), "w") as f:
                 yaml.safe_dump(cfg, f)
             r = subprocess.run(["docker", "run", "--rm", *ENV, "-v", f"{d}:/c", COL_IMAGE,
@@ -275,7 +285,7 @@ class MetricsCollectorContainer(unittest.TestCase):
     def test_config_with_server_name_validates(self):
         # Render through the real install_metrics_scraper (stub helm captures the values file).
         stubs = os.path.join(ROOT, "tests", "integration", "stubs")
-        with tempfile.TemporaryDirectory() as w:
+        with mount_dir() as w:
             env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "REPO_SRC": ROOT,
                    "HELM_CALLS_LOG": f"{w}/helm.log", "HELM_INSTALL_RETRY_DELAY": "0"}
             subprocess.run(["bash", os.path.join(ROOT, "last9-otel-setup.sh"), "function=install_metrics_scraper",
@@ -310,7 +320,7 @@ class MetricsCollectorContainer(unittest.TestCase):
                                                   "processors": ["filter/last9_keep"],
                                                   "exporters": ["file"]}}},
         }
-        with tempfile.TemporaryDirectory() as d:
+        with mount_dir() as d:
             os.makedirs(f"{d}/in"); os.makedirs(f"{d}/out"); os.chmod(f"{d}/out", 0o777)
             with open(f"{d}/in/m.json", "w") as f:
                 f.write(json.dumps(otlp) + "\n")
@@ -381,7 +391,7 @@ class MetricsCollectorContainer(unittest.TestCase):
                                                   "processors": ["filter/last9_kubelet_dedup"],
                                                   "exporters": ["file"]}}},
         }
-        with tempfile.TemporaryDirectory() as d:
+        with mount_dir() as d:
             os.makedirs(f"{d}/out"); os.chmod(f"{d}/out", 0o777)
             with open(f"{d}/config.yaml", "w") as f:
                 yaml.safe_dump(cfg, f)
