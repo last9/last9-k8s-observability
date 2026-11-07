@@ -11,6 +11,7 @@
 #   SIMULATE_SCRAPER_FAILED_CONST  "1" -> send_failed counter is non-zero but constant (earlier blip)
 #   (sent counter grows on every metrics poll; send_failed grows too when SIMULATE_SCRAPER_SEND_FAILED=1)
 #   SIMULATE_KUBELET_ZERO_TARGETS  "1" -> TA kubelet job exists but has no targets
+#   SIMULATE_SCRAPES_FAILING  "1" -> collector's local up series are all 0 (e.g. NetworkPolicy blocks scrapes)
 #   SIMULATE_KUBELET_SVC / SIMULATE_KUBELET_SVC_MANAGED_BY  orphaned operator kubelet Service in kube-system
 #   SIMULATE_PROXY_BLOCKED  "1" -> `get --raw` (apiserver proxy) fails; `port-forward` prints a fake local port
 #   SIMULATE_BUNDLED_PROMETHEUS  "1" -> a bundled Prometheus StatefulSet exists in the namespace
@@ -66,7 +67,11 @@ case "$cmd" in
         ;;
     "port-forward "*)
         # Fake forward: svc/* -> 11111, pod/* -> 22222; stays alive until the script kills it
-        case "$cmd" in *svc/*) echo "Forwarding from 127.0.0.1:11111 -> 80";; *) echo "Forwarding from 127.0.0.1:22222 -> 8888";; esac
+        case "$cmd" in
+            *svc/*) echo "Forwarding from 127.0.0.1:11111 -> 80";;
+            *:9465*) echo "Forwarding from 127.0.0.1:33333 -> 9465";;
+            *) echo "Forwarding from 127.0.0.1:22222 -> 8888";;
+        esac
         [ "$SIMULATE_PORT_FORWARD_EXITS" = "1" ] && exit 0
         exec sleep 30
         ;;
@@ -91,6 +96,17 @@ case "$cmd" in
         # SIMULATE_KUBELET_SVC=1 -> our operator-created Service exists; managed-by label from
         # SIMULATE_KUBELET_SVC_MANAGED_BY (default prometheus-operator)
         [ "$SIMULATE_KUBELET_SVC" = "1" ] && echo "${SIMULATE_KUBELET_SVC_MANAGED_BY:-prometheus-operator}"
+        exit 0
+        ;;
+    "get --raw "*":9465/proxy/metrics")
+        # Collector's local `up` exporter: one series per core target
+        if [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ]; then
+            v=1; [ "$SIMULATE_SCRAPES_FAILING" = "1" ] && v=0
+            echo "up{instance=\"10.0.0.2:8080\",job=\"kube-state-metrics\",namespace=\"last9\"} $v"
+            echo "up{instance=\"10.0.0.3:9100\",job=\"node-exporter\",namespace=\"last9\"} $v"
+            echo "up{instance=\"10.0.0.1:10250\",job=\"kubelet\",metrics_path=\"/metrics\"} $v"
+            echo "up{instance=\"10.0.0.1:10250\",job=\"kubelet\",metrics_path=\"/metrics/cadvisor\"} $v"
+        fi
         exit 0
         ;;
     "get --raw "*"/proxy/metrics")

@@ -425,6 +425,27 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     grep -q "proxy/jobs/kubelet/targets" "$KUBECTL_CALLS_LOG"
 }
 
+@test "verify_metrics_scraper fails when scrapes fail even though exports grow" {
+    export SIMULATE_SCRAPER_HEALTHY=1 SIMULATE_SCRAPES_FAILING=1
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scrape-up:kube-state-metrics"* ]]
+    [[ "$output" == *"scrape-up:node-exporter"* ]]
+    [[ "$output" == *"scrape-up:kubelet"* ]]
+    [[ "$output" == *"scrape-up:cadvisor"* ]]
+    grep -q "pods/last9-otel-metrics-0:9465/proxy/metrics" "$KUBECTL_CALLS_LOG"
+}
+
+@test "migration with failing scrapes leaves prometheus running" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1 SIMULATE_SCRAPES_FAILING=1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+    ! grep -q "prometheus.enabled=false" "$HELM_CALLS_LOG"
+}
+
 @test "failing helm list aborts without touching anything" {
     export SIMULATE_HELM_LIST_FAILURE=1
     run_monitoring_only
@@ -514,6 +535,11 @@ case "$url" in
     http://127.0.0.1:22222/metrics)
         n=$(cat "$CURL_LOG.n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$CURL_LOG.n"
         echo "otelcol_exporter_sent_metric_points_total{exporter=\"x\"} $((n * 100))" ;;
+    http://127.0.0.1:33333/metrics)
+        echo 'up{job="kube-state-metrics",namespace="last9"} 1'
+        echo 'up{job="node-exporter",namespace="last9"} 1'
+        echo 'up{job="kubelet",metrics_path="/metrics"} 1'
+        echo 'up{job="kubelet",metrics_path="/metrics/cadvisor"} 1' ;;
     *) exit 22 ;;
 esac
 SH

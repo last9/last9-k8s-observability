@@ -226,12 +226,23 @@ class MetricsCollectorValues(unittest.TestCase):
 
     def test_pipeline_order(self):
         p = self.cfg["service"]["pipelines"]
-        self.assertEqual(list(p), ["metrics"])
+        self.assertEqual(list(p), ["metrics", "metrics/scrape_health"])
         self.assertEqual(p["metrics"], {
             "receivers": ["prometheus"],
             "processors": ["memory_limiter", "filter/last9_keep", "filter/last9_kubelet_dedup", "batch"],
             "exporters": ["prometheusremotewrite/last9"],
         })
+
+    def test_scrape_health_pipeline_serves_only_up_locally(self):
+        # The installer reads per-target `up` here before it disables Prometheus.
+        self.assertEqual(self.cfg["service"]["pipelines"]["metrics/scrape_health"], {
+            "receivers": ["prometheus"],
+            "processors": ["filter/scrape_health"],
+            "exporters": ["prometheus/scrape_health"],
+        })
+        self.assertEqual(self.cfg["processors"]["filter/scrape_health"]["metrics"]["metric"],
+                         ['name != "up"'])
+        self.assertEqual(self.cfg["exporters"]["prometheus/scrape_health"]["endpoint"], "0.0.0.0:9465")
 
     def test_credentials_from_secret(self):
         sts = kind(self.docs, "StatefulSet")[0]
