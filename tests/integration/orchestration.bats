@@ -313,3 +313,114 @@ run_scraper() {
     run bash "$SCRIPT" function=verify_metrics_scraper
     [ "$status" -ne 0 ]
 }
+
+@test "verify_metrics_scraper passes when failed counter is non-zero but constant" {
+    export SIMULATE_SCRAPER_HEALTHY=1 SIMULATE_SCRAPER_FAILED_CONST=1
+    export VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_metrics_scraper fails when failed counter keeps growing" {
+    export SIMULATE_SCRAPER_HEALTHY=1 SIMULATE_SCRAPER_SEND_FAILED=1
+    export VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[WARN]"* ]]
+}
+
+@test "install_metrics_scraper returns 1 with a warning when monitoring endpoint is empty" {
+    run bash "$SCRIPT" function=install_metrics_scraper \
+        token=tok endpoint=https://example.com cluster=test-cluster
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[WARN]"* ]]
+    ! grep -q "upgrade --install last9-target-allocator" "$HELM_CALLS_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# setup_last9_monitoring: bundled Prometheus flipped off, scraper ordering
+# ---------------------------------------------------------------------------
+
+line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
+
+@test "monitoring always disables bundled prometheus operator" {
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    grep "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG" | grep -q -- "--set prometheusOperator.enabled=false"
+    grep -q '^  enabled: false' <(awk '/^prometheus:/{f=1;next} /^[^ ]/{f=0} f' "$REPO_ROOT/k8s-monitoring-values.yaml")
+}
+
+@test "monitoring disables prometheus operator with a detected existing operator too" {
+    export SIMULATE_EXISTING_CRDS=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    grep "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG" | grep -q -- "--set prometheusOperator.enabled=false"
+}
+
+@test "migration (existing release) installs scraper before flipping monitoring" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_SCRAPER_HEALTHY=1
+    export VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    ta=$(line_of "upgrade --install last9-target-allocator")
+    col=$(line_of "upgrade --install last9-otel-metrics")
+    kps=$(line_of "upgrade --install last9-k8s-monitoring")
+    [ -n "$ta" ] && [ -n "$col" ] && [ -n "$kps" ]
+    [ "$ta" -lt "$col" ] && [ "$col" -lt "$kps" ]
+}
+
+@test "fresh install (no release) installs monitoring before scraper" {
+    export SIMULATE_SCRAPER_HEALTHY=1
+    export VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    kps=$(line_of "upgrade --install last9-k8s-monitoring")
+    ta=$(line_of "upgrade --install last9-target-allocator")
+    col=$(line_of "upgrade --install last9-otel-metrics")
+    [ -n "$ta" ] && [ -n "$col" ] && [ -n "$kps" ]
+    [ "$kps" -lt "$ta" ] && [ "$ta" -lt "$col" ]
+}
+
+@test "fresh install: verify failure exits non-zero with a clear message" {
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[ERROR]"* ]]
+    [[ "$output" == *"verification failed"* ]]
+}
+
+@test "verify failure leaves prometheus running" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+    [[ "$output" == *"still running"* ]]
+    [[ "$output" == *"re-run"* ]]
+}
+
+@test "re-run after verify failure completes migration" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    : > "$HELM_CALLS_LOG"; rm -f "$KUBECTL_CALLS_LOG.metrics_polls"
+    export SIMULATE_SCRAPER_HEALTHY=1 VERIFY_SCRAPER_TIMEOUT=3
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+}
+
+@test "full mode includes scraper" {
+    export SIMULATE_SCRAPER_HEALTHY=1 VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" token=tok endpoint=https://example.com \
+        monitoring-endpoint="https://mock.last9.io/write" username=u password=p cluster=test-cluster
+    grep -q "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG"
+}
+
+@test "logs-only, operator-only, events-only never install scraper" {
+    run bash "$SCRIPT" logs-only token=tok endpoint=https://example.com
+    run bash "$SCRIPT" operator-only token=tok endpoint=https://example.com
+    run bash "$SCRIPT" events-only
+    ! grep -q "last9-otel-metrics\|last9-target-allocator" "$HELM_CALLS_LOG"
+}

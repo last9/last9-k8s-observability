@@ -90,8 +90,9 @@ curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-o
 
 | Component | Purpose |
 |-----------|---------|
-| kube-prometheus-stack | Prometheus Operator + AlertManager |
-| PrometheusAgent | Scrapes cluster metrics, remote-writes to Last9 |
+| kube-prometheus-stack | Provides CRDs, ServiceMonitors, kube-state-metrics and node-exporter (Prometheus and its operator are disabled) |
+| `last9-otel-metrics` (OTel Collector StatefulSet) | Scrapes cluster metrics, remote-writes to Last9 |
+| `last9-target-allocator` | Standalone Target Allocator: discovers ServiceMonitor/PodMonitor targets and shards them across collector replicas |
 | kube-state-metrics | Kubernetes object state metrics |
 | node-exporter | Per-node CPU/memory/disk metrics |
 
@@ -99,9 +100,19 @@ curl -fsSL https://raw.githubusercontent.com/last9/l9-otel-operator/main/last9-o
 
 ```bash
 kubectl get pods -n last9
-kubectl get prometheusagent -n last9
+kubectl get pods -n last9 -l app.kubernetes.io/instance=last9-otel-metrics
 kubectl get secrets -n last9 last9-remote-write-secret
 ```
+
+> **Migrating from the bundled Prometheus**
+>
+> Re-run the same `monitoring-only` command. If a `last9-k8s-monitoring` release already exists, the script first installs the OTel scraper and waits until it is exporting, and only then upgrades `last9-k8s-monitoring` with Prometheus disabled, so there is no gap in metrics. If the scraper does not become healthy, Prometheus is left running untouched and the script exits non-zero; fix the problem and re-run.
+>
+> **Application metrics:** pass `app-metrics-keep=<regex>` to also forward application metric names matching the regex (alternated into the default allowlist).
+>
+> **EC2 / IRSA:** the `ec2-metadata` job's IAM role annotation (`eks.amazonaws.com/role-arn`) now goes on the `last9-target-allocator` service account (in `last9-target-allocator-values.yaml`), not on a Prometheus service account. Pod Identity needs no annotation.
+>
+> **ArgoCD / GitOps:** manage `last9-target-allocator` and `last9-otel-metrics` as separate Applications, sync the target allocator first, then the collector, and only then sync `last9-k8s-monitoring` with `prometheus.enabled: false`. Do not sync the `k8s-monitoring-values.yaml` change before the scraper is healthy.
 
 > **Pre-existing Prometheus CRDs (Terraform / prior Helm installs)**
 >
@@ -205,7 +216,7 @@ Use `server-name=` when your OTLP / metrics endpoint terminates TLS behind a pro
 When set, it injects (only into the files being installed):
 
 - `tls.server_name_override` (with `insecure: false`) under the `otlp/last9` exporter in the collector and events-agent configs.
-- `tlsConfig.serverName` under the Prometheus `remoteWrite` entry in the monitoring config.
+- Not applied to the OTel metrics scraper (`last9-otel-metrics-values.yaml`); set the exporter TLS server name there manually if needed.
 
 When omitted (the default), no TLS block is added and the values files are unchanged — fully backward compatible.
 
@@ -230,12 +241,10 @@ helm get values last9-kube-events-agent -n last9 -o yaml > events-values.yaml
 helm upgrade last9-kube-events-agent open-telemetry/opentelemetry-collector \
   -n last9 -f events-values.yaml --reuse-values=false
 
-# Monitoring (Prometheus): under prometheus.prometheusSpec.remoteWrite[0] add:
-#   tlsConfig:
-#     serverName: ingest-internal.example.last9.cloud
-helm get values last9-k8s-monitoring -n last9 -o yaml > monitoring-values.yaml
-helm upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
-  -n last9 -f monitoring-values.yaml --reuse-values=false
+# Metrics scraper (last9-otel-metrics): add the same tls block under the prometheusremotewrite exporter
+helm get values last9-otel-metrics -n last9 -o yaml > metrics-values.yaml
+helm upgrade last9-otel-metrics open-telemetry/opentelemetry-collector \
+  -n last9 -f metrics-values.yaml --reuse-values=false
 ```
 
 ## Configuration Files
@@ -245,7 +254,9 @@ helm upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
 | `last9-otel-collector-values.yaml` | OpenTelemetry Collector configuration for logs and traces |
 | `last9-otel-collector-metrics-values.yaml` | Optional: Application metrics scraping (Prometheus SD) |
 | `last9-otel-collector-gpu-values.yaml` | Optional: GPU (DCGM) + Ray metrics scraping (includes app metrics) |
-| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration for metrics |
+| `k8s-monitoring-values.yaml` | Kube-prometheus-stack configuration (exporters and CRDs only; Prometheus disabled) |
+| `last9-otel-metrics-values.yaml` | OTel Collector (StatefulSet) that scrapes cluster metrics and remote-writes to Last9 |
+| `last9-target-allocator-values.yaml` | Standalone Target Allocator for the metrics collector |
 | `last9-kube-events-agent-values.yaml` | Events collection agent configuration |
 | `collector-svc.yaml` | Collector service for application instrumentation |
 | `instrumentation.yaml` | Auto-instrumentation configuration |
@@ -292,8 +303,8 @@ kubectl get pods -n last9
 # Check collector logs
 kubectl logs -n last9 -l app.kubernetes.io/name=opentelemetry-collector
 
-# Check monitoring stack
-kubectl get prometheus -n last9
+# Check metrics scraper
+kubectl get pods -n last9 -l app.kubernetes.io/instance=last9-otel-metrics
 
 # Check events agent
 kubectl get pods -n last9 -l app.kubernetes.io/name=last9-kube-events-agent

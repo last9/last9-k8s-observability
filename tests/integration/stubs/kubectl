@@ -8,6 +8,8 @@
 #   KUBECTL_CALLS_LOG       file to append each call to (full arg string)
 #   SIMULATE_EXISTING_CRDS  "1" → Prometheus CRDs already present on cluster
 #   SIMULATE_SCRAPER_HEALTHY / SIMULATE_SCRAPER_SEND_FAILED  "1" → healthy scraper endpoints for verify_metrics_scraper
+#   SIMULATE_SCRAPER_FAILED_CONST  "1" -> send_failed counter is non-zero but constant (earlier blip)
+#   (sent counter grows on every metrics poll; send_failed grows too when SIMULATE_SCRAPER_SEND_FAILED=1)
 #   MOCK_CONTEXT            value returned by `config current-context`
 
 # Record the full call (including any --context flag the wrapper injected)
@@ -53,8 +55,15 @@ case "$cmd" in
     "get --raw "*"/proxy/metrics")
         if [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ]; then
             echo '# TYPE otelcol_exporter_sent_metric_points_total counter'
-            echo 'otelcol_exporter_sent_metric_points_total{exporter="prometheusremotewrite/last9"} 1234'
+            poll_file="${KUBECTL_CALLS_LOG:-/tmp/kubectl-stub}.metrics_polls"
+            n=0
+            [ -f "$poll_file" ] && n=$(cat "$poll_file")
+            n=$((n + 1))
+            echo "$n" > "$poll_file"
+            echo "otelcol_exporter_sent_metric_points_total{exporter=\"prometheusremotewrite/last9\"} $((1000 + n * 100))"
             if [ "$SIMULATE_SCRAPER_SEND_FAILED" = "1" ]; then
+                echo "otelcol_exporter_send_failed_metric_points_total{exporter=\"prometheusremotewrite/last9\"} $((n * 5))"
+            elif [ "$SIMULATE_SCRAPER_FAILED_CONST" = "1" ]; then
                 echo 'otelcol_exporter_send_failed_metric_points_total{exporter="prometheusremotewrite/last9"} 5'
             fi
         fi

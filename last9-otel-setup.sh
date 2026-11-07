@@ -62,7 +62,6 @@ DEPLOYMENT_ENV=""
 KUBE_CONTEXT=""
 EXISTING_PROMETHEUS_OPERATOR=""
 EXISTING_PROMETHEUS_OPERATOR_IMAGE=""
-AGENT_STS="prom-agent-last9-k8s-monitoring-kube-prometheus"
 AGENT_RECONCILE_TRIES="${AGENT_RECONCILE_TRIES:-24}"
 AGENT_RECONCILE_INTERVAL="${AGENT_RECONCILE_INTERVAL:-5}"
 SERVER_NAME=""
@@ -2386,107 +2385,6 @@ detect_existing_prometheus_operator() {
     return 1
 }
 
-# Image tag of the config-reloader the operator stamped into our agent
-# StatefulSet. Each operator writes its own version here, so a change to the
-# external operator's tag is evidence that it (not a previous bundled operator)
-# reconciled the agent. Empty ONLY when the API confirms the StatefulSet does
-# not exist; "unknown" when it exists but the tag can't be read (e.g.
-# digest-pinned) or the API read keeps failing — a failed read must never be
-# mistaken for absence.
-agent_reloader_tag() {
-    local out attempt
-    for attempt in 1 2 3; do
-        if out=$(kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" --ignore-not-found \
-            -o jsonpath='{.metadata.name}{"\t"}{.spec.template.spec.containers[?(@.name=="config-reloader")].image}' 2>/dev/null); then
-            [ -z "$out" ] && return 0
-            local image="${out#*$'\t'}"
-            case "$image" in
-                *@*|"") echo "unknown" ;;
-                *:*) echo "${image##*:}" ;;
-                *) echo "unknown" ;;
-            esac
-            return 0
-        fi
-        [ "$attempt" -lt 3 ] && sleep "$AGENT_RECONCILE_INTERVAL"
-    done
-    echo "unknown"
-}
-
-# Returns 0 when the operator's watch-scope flags provably exclude $NAMESPACE
-# for Prometheus/PrometheusAgent instances. Mirrors prometheus-operator:
-# --prometheus-instance-namespaces overrides --namespaces, and
-# --deny-namespaces only applies when neither allow-list is set.
-operator_excludes_namespace() {
-    local args="$1" allow deny
-    allow=$(printf '%s\n' "$args" | sed -n 's/^--prometheus-instance-namespaces=//p' | head -1)
-    [ -z "$allow" ] && allow=$(printf '%s\n' "$args" | sed -n 's/^--namespaces=//p' | head -1)
-    if [ -n "$allow" ]; then
-        case ",$allow," in *",$NAMESPACE,"*) return 1 ;; esac
-        return 0
-    fi
-    deny=$(printf '%s\n' "$args" | sed -n 's/^--deny-namespaces=//p' | head -1)
-    case ",$deny," in *",$NAMESPACE,"*) return 0 ;; esac
-    return 1
-}
-
-# With the bundled operator disabled, the customer's operator must reconcile
-# our PrometheusAgent. It silently won't if it is scoped to other namespaces
-# or predates PrometheusAgent support (< v0.64). On an upgrade the StatefulSet
-# already exists from the bundled operator, so its presence proves nothing;
-# require the reloader tag to move to the external operator's version.
-#   $1 - agent reloader tag captured before the Helm install ("" = no StatefulSet)
-verify_existing_operator_reconciles_agent() {
-    local prior_tag="$1"
-    local op_ns="${EXISTING_PROMETHEUS_OPERATOR%%/*}" op_name="${EXISTING_PROMETHEUS_OPERATOR#*/}"
-    local args
-    args=$(kubectl get deployment "$op_name" -n "$op_ns" \
-        -o jsonpath='{range .spec.template.spec.containers[*]}{range .args[*]}{@}{"\n"}{end}{end}' 2>/dev/null) || args=""
-
-    if operator_excludes_namespace "$args"; then
-        log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) does not watch namespace '$NAMESPACE'."
-        log_warn "  Its --namespaces / --prometheus-instance-namespaces / --deny-namespaces flags exclude it,"
-        log_warn "  so nothing will reconcile the Last9 PrometheusAgent. Add '$NAMESPACE' to the operator's watched namespaces."
-        return 0
-    fi
-    if printf '%s\n' "$args" | grep -q '^--prometheus-instance-selector='; then
-        log_warn "⚠ The existing operator uses --prometheus-instance-selector; the Last9 PrometheusAgent must match it to be reconciled."
-    fi
-
-    local op_tag=""
-    case "$EXISTING_PROMETHEUS_OPERATOR_IMAGE" in
-        *@*) ;;
-        *:*) op_tag="${EXISTING_PROMETHEUS_OPERATOR_IMAGE##*:}" ;;
-    esac
-
-    if [ -n "$prior_tag" ] && { [ -z "$op_tag" ] || [ "$prior_tag" = "unknown" ] || [ "$prior_tag" = "$op_tag" ]; }; then
-        log_warn "⚠ Could not confirm the existing operator ($EXISTING_PROMETHEUS_OPERATOR) took over the Last9 PrometheusAgent:"
-        log_warn "  the StatefulSet predates this install (or could not be read), so its config-reloader"
-        log_warn "  version can't show which operator reconciled it."
-        log_warn "  Verify with: kubectl logs -n $op_ns deploy/$op_name | grep $NAMESPACE/"
-        return 0
-    fi
-
-    if [ -z "$prior_tag" ]; then
-        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to create StatefulSet $AGENT_STS..."
-    else
-        log_info "Waiting for existing operator '$EXISTING_PROMETHEUS_OPERATOR' to take over StatefulSet $AGENT_STS ($prior_tag -> $op_tag)..."
-    fi
-    local i current
-    for i in $(seq 1 "$AGENT_RECONCILE_TRIES"); do
-        current=$(agent_reloader_tag)
-        if { [ -z "$prior_tag" ] && kubectl get statefulset "$AGENT_STS" -n "$NAMESPACE" &>/dev/null; } \
-            || { [ -n "$prior_tag" ] && [ "$current" = "$op_tag" ]; }; then
-            log_info "✓ Existing operator is reconciling the Last9 PrometheusAgent"
-            return 0
-        fi
-        sleep "$AGENT_RECONCILE_INTERVAL"
-    done
-    log_warn "⚠ The existing operator ($EXISTING_PROMETHEUS_OPERATOR) has not reconciled StatefulSet $AGENT_STS in namespace '$NAMESPACE'."
-    log_warn "  Check that it is v0.64+ and watches '$NAMESPACE':"
-    log_warn "    kubectl get deployment -n $op_ns $op_name -o jsonpath='{.spec.template.spec.containers[0].args}'"
-    log_warn "    kubectl describe prometheusagent -n $NAMESPACE"
-}
-
 # Function to setup Last9 monitoring stack
 setup_last9_monitoring() {
     log_info "Setting up Last9 monitoring stack..."
@@ -2546,33 +2444,9 @@ setup_last9_monitoring() {
     if [ ! -f "k8s-monitoring-values.yaml" ]; then
         log_error "k8s-monitoring-values.yaml not found in current directory"
     fi
-    
-    # Create backup of original file
-    cp k8s-monitoring-values.yaml k8s-monitoring-values.yaml.backup
-    log_info "Created backup: k8s-monitoring-values.yaml.backup"
-    
-    # Replace cluster name placeholder in the values file
-    log_info "Updating cluster name in k8s-monitoring-values.yaml..."
-    log_info "Cluster name to replace: $cluster_name"
-    # Use awk for more robust replacement that handles special characters better
-    awk -v cluster="$cluster_name" '{gsub(/my-cluster-name/, cluster)}1' k8s-monitoring-values.yaml > k8s-monitoring-values.yaml.tmp && mv k8s-monitoring-values.yaml.tmp k8s-monitoring-values.yaml
-    
-    # Note: Using awk instead of sed for cluster name replacement to handle special characters
-    
-    # Verify the change was made
-    if grep -q "cluster: $cluster_name" k8s-monitoring-values.yaml; then
-        log_info "✓ Cluster name placeholder replaced successfully!"
-        log_info "Updated line: $(grep 'cluster:' k8s-monitoring-values.yaml)"
-    else
-        log_warn "⚠ Could not verify cluster name replacement. Please check the file manually."
-        log_warn "Current cluster line: $(grep 'cluster:' k8s-monitoring-values.yaml || echo 'Not found')"
-    fi
-    
-    # Update monitoring endpoint placeholder
-    update_monitoring_endpoint
-
-    # Inject TLS server name override if provided (no-op when unset)
-    inject_monitoring_tls_server_name
+    # The cluster name and endpoint now live only in the OTel scraper values
+    # (rendered by install_metrics_scraper); k8s-monitoring-values.yaml has no
+    # placeholders left and is used as-is.
 
     # Load tolerations if provided (needed for kubectl patching later)
     # NOTE: We skip apply_tolerations_to_monitoring_values() to avoid yq lexer issues
@@ -2590,13 +2464,16 @@ setup_last9_monitoring() {
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     helm repo update prometheus-community
 
-    # Detect an existing cluster-wide Prometheus Operator and disable the
-    # bundled one if found, to prevent the two-operator reconciliation conflict.
-    local operator_flag=""
-    local prior_agent_tag=""
-    if detect_existing_prometheus_operator; then
-        operator_flag="--set prometheusOperator.enabled=false"
-        prior_agent_tag=$(agent_reloader_tag)
+    # Detect an existing cluster-wide Prometheus Operator (informational; the bundled
+    # operator is always disabled now that no Prometheus/PrometheusAgent is deployed).
+    detect_existing_prometheus_operator || true
+
+    # A pre-existing last9-k8s-monitoring release means we are migrating an install that
+    # still runs the bundled Prometheus: bring the OTel scraper up first so there is no
+    # gap in metrics, then flip Prometheus off.
+    local migrating=false
+    if _helm_release_exists last9-k8s-monitoring "$NAMESPACE"; then
+        migrating=true
     fi
 
     # Adopt any pre-existing Prometheus operator CRDs (monitoring.coreos.com)
@@ -2628,23 +2505,17 @@ setup_last9_monitoring() {
     fi
     adopt_prometheus_crds
 
-    # Install/upgrade the monitoring stack
-    log_info "Installing/upgrading Last9 K8s monitoring stack..."
-    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
-        --version "$MONITORING_VERSION" \
-        -n "$NAMESPACE" \
-        -f k8s-monitoring-values.yaml \
-        --create-namespace \
-        $HELM_SCHEMA_FLAG \
-        $operator_flag \
-        $skip_crds_flag; then
-        log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
-    fi
-
-    log_info "✓ Last9 K8s monitoring stack deployed successfully!"
-
-    if [ -n "$EXISTING_PROMETHEUS_OPERATOR" ]; then
-        verify_existing_operator_reconciles_agent "$prior_agent_tag"
+    if [ "$migrating" = true ]; then
+        log_info "Existing last9-k8s-monitoring release found: migrating to the OTel metrics scraper"
+        if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
+            log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
+        fi
+        install_monitoring_stack "$skip_crds_flag"
+    else
+        install_monitoring_stack "$skip_crds_flag"
+        if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
+            log_error "OTel metrics scraper installation/verification failed (see output above). Fix the issue and re-run this script."
+        fi
     fi
 
     # Patch monitoring components with tolerations and nodeSelector if provided
@@ -2655,7 +2526,8 @@ setup_last9_monitoring() {
 
     # Show the deployed resources
     log_info "Monitoring stack resources in last9 namespace:"
-    kubectl get pods -n last9 -l "app.kubernetes.io/name=prometheus" 2>/dev/null || true
+    kubectl get pods -n last9 -l "app.kubernetes.io/instance=last9-otel-metrics" 2>/dev/null || true
+    kubectl get pods -n last9 -l "app.kubernetes.io/instance=last9-target-allocator" 2>/dev/null || true
     kubectl get pods -n last9 -l "app.kubernetes.io/name=kube-state-metrics" 2>/dev/null || true
     kubectl get pods -n last9 -l "app.kubernetes.io/name=node-exporter" 2>/dev/null || true
     
@@ -2663,13 +2535,30 @@ setup_last9_monitoring() {
     echo ""
     echo "Summary:"
     echo "  ✓ Created secret: last9-remote-write-secret"
-    echo "  ✓ Updated cluster name in k8s-monitoring-values.yaml"
-    echo "  ✓ Deployed kube-prometheus-stack with Last9 configuration"
+    echo "  ✓ Deployed OTel metrics scraper (collector + target allocator) with cluster name: $cluster_name"
+    echo "  ✓ Deployed kube-state-metrics and node-exporter (kube-prometheus-stack, Prometheus disabled)"
     echo ""
     echo "To verify the deployment:"
     echo "  kubectl get pods -n last9"
     echo "  kubectl get secrets -n last9 last9-remote-write-secret"
-    echo "  kubectl get prometheus -n last9"
+    echo "  kubectl get pods -n last9 -l app.kubernetes.io/instance=last9-otel-metrics"
+}
+
+# Install/upgrade kube-prometheus-stack with Prometheus and the bundled operator disabled
+# (it still provides CRDs, kube-state-metrics, node-exporter and ServiceMonitors). $1 = extra skip-crds flag.
+install_monitoring_stack() {
+    log_info "Installing/upgrading Last9 K8s monitoring stack..."
+    if ! helm_upgrade_install_with_retry last9-k8s-monitoring prometheus-community/kube-prometheus-stack \
+        --version "$MONITORING_VERSION" \
+        -n "$NAMESPACE" \
+        -f k8s-monitoring-values.yaml \
+        --create-namespace \
+        $HELM_SCHEMA_FLAG \
+        --set prometheusOperator.enabled=false \
+        $1; then
+        log_error "Helm install/upgrade failed for last9-k8s-monitoring. See output above."
+    fi
+    log_info "✓ Last9 K8s monitoring stack deployed successfully!"
 }
 
 # Replace every literal occurrence of $2 with $3 in file $1 (no regex/& interpretation).
@@ -2694,6 +2583,10 @@ install_metrics_scraper() {
     local col_values="last9-otel-metrics-values.rendered.yaml"
 
     log_info "Installing OTel metrics scraper (Target Allocator + collector)..."
+    if [ -z "$MONITORING_ENDPOINT" ]; then
+        log_warn "Monitoring endpoint is empty; pass monitoring-endpoint=<value>"
+        return 1
+    fi
     if [ ! -f "$ta_values" ] || [ ! -f "$col_src" ]; then
         log_warn "$ta_values or $col_src not found in current directory"
         return 1
@@ -2752,7 +2645,8 @@ install_metrics_scraper() {
 # Returns 0 when healthy, 1 (after warning what is missing) on timeout.
 verify_metrics_scraper() {
     local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
-    local waited=0 missing job configs metrics
+    local waited=0 missing job configs metrics totals sent failed
+    local prev_sent="" prev_failed=""
 
     log_info "Verifying OTel metrics scraper (up to ${timeout}s)..."
     while true; do
@@ -2763,13 +2657,21 @@ verify_metrics_scraper() {
         done
         metrics=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy/metrics" 2>/dev/null || true)
         # Sum series by name prefix; collector 0.156 may or may not append _total.
-        printf '%s\n' "$metrics" | awk '
+        totals=$(printf '%s\n' "$metrics" | awk '
             /^#/ { next }
             { n = $1; sub(/\{.*/, "", n) }
             n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
             n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
-            END { exit !(sent > 0 && failed == 0) }' \
-            || missing="$missing collector-export(sent>0,failed=0)"
+            END { print sent + 0, failed + 0 }')
+        sent=${totals% *}; failed=${totals#* }
+        # Judge export health as a delta between consecutive polls: a cumulative failed>0
+        # from an earlier transient blip must not block forever.
+        if [ -z "$prev_sent" ]; then
+            missing="$missing collector-export(need 2 polls)"
+        elif ! awk -v s="$sent" -v ps="$prev_sent" -v f="$failed" -v pf="$prev_failed" 'BEGIN { exit !(s > ps && f <= pf) }'; then
+            missing="$missing collector-export(sent must grow, failed must not)"
+        fi
+        prev_sent=$sent; prev_failed=$failed
 
         if [ -z "$missing" ]; then
             log_info "✓ OTel metrics scraper is healthy"
@@ -3434,7 +3336,7 @@ main() {
         log_info "🎉 Cluster Monitoring installation completed successfully!"
         log_info "Next steps:"
         echo "  1. Wait for monitoring pods to be in Running state: kubectl get pods -n $NAMESPACE"
-        echo "  2. Check Prometheus logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=prometheus"
+        echo "  2. Check scraper logs: kubectl logs -n $NAMESPACE last9-otel-metrics-0"
         echo "  3. Verify monitoring services: kubectl get svc -n $NAMESPACE"
         echo ""
         echo "📝 Note: Monitoring stack deployed with cluster name: $CLUSTER_NAME"
