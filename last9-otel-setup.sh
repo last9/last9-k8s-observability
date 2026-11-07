@@ -2617,8 +2617,10 @@ verify_metrics_scraper() {
             | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
         metrics=$(scraper_get col /metrics || true)
         # Sum series by name prefix; collector 0.156 may or may not append _total.
+        # Only the remote-write exporter counts: the local scrape_health exporter
+        # also sends points, and those prove nothing about reaching Last9.
         totals=$(printf '%s\n' "$metrics" | awk '
-            /^#/ { next }
+            /^#/ || !/exporter="prometheusremotewrite\/last9"/ { next }
             { n = $1; sub(/\{.*/, "", n) }
             n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
             n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
