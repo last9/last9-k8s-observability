@@ -1950,20 +1950,18 @@ install_operator() {
 
         # Note: For operator chart, tolerations and nodeSelector are at root level (no prefix)
         local tolerations_args=$(convert_tolerations_to_helm_set "$TOLERATIONS_FILE_PATH" "")
+        local -a split_args
         if [ -n "$tolerations_args" ]; then
-            # Parse --set arguments from tolerations_args string and add to array
-            while IFS= read -r arg; do
-                [ -n "$arg" ] && helm_args+=("$arg")
-            done < <(echo "$tolerations_args" | xargs -n1)
+            # read -a, not xargs: xargs strips the `\.` escapes Helm needs in dotted keys
+            read -r -a split_args <<< "$tolerations_args"
+            helm_args+=("${split_args[@]}")
             log_info "✓ Tolerations added to operator"
         fi
 
         local node_selector_args=$(convert_node_selector_to_helm_set "$TOLERATIONS_FILE_PATH" "")
         if [ -n "$node_selector_args" ]; then
-            # Parse --set arguments from node_selector_args string and add to array
-            while IFS= read -r arg; do
-                [ -n "$arg" ] && helm_args+=("$arg")
-            done < <(echo "$node_selector_args" | xargs -n1)
+            read -r -a split_args <<< "$node_selector_args"
+            helm_args+=("${split_args[@]}")
             log_info "✓ NodeSelector added to operator"
         fi
     fi
@@ -2506,11 +2504,8 @@ install_metrics_scraper() {
         load_tolerations_from_file "$TOLERATIONS_FILE"
     fi
     if [ -n "$TOLERATIONS_FILE_PATH" ]; then
-        local arg
-        while IFS= read -r arg; do
-            [ -n "$arg" ] && scheduling_args+=("$arg")
-        done < <({ convert_tolerations_to_helm_set "$TOLERATIONS_FILE_PATH" ""
-                   convert_node_selector_to_helm_set "$TOLERATIONS_FILE_PATH" ""; } | xargs -n1)
+        # read -a splits on whitespace without xargs' backslash processing, so `kubernetes\.io` stays one key.
+        read -r -a scheduling_args <<< "$(convert_tolerations_to_helm_set "$TOLERATIONS_FILE_PATH" "") $(convert_node_selector_to_helm_set "$TOLERATIONS_FILE_PATH" "")"
     fi
 
     if ! helm_upgrade_install_with_retry last9-target-allocator open-telemetry/opentelemetry-target-allocator \
