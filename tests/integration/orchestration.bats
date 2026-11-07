@@ -579,3 +579,21 @@ SH
     [ "$status" -eq 0 ]
     [[ "$output" == *"deployed but NOT verified"* ]]
 }
+
+@test "operator install with pre-existing OTel CRDs marks them helm keep before crds.create=false" {
+    export SIMULATE_EXISTING_OTEL_CRDS=1 HELM_CALLS_LOG="$KUBECTL_CALLS_LOG"   # one shared log = real call order
+    run bash "$SCRIPT" operator-only token=tok endpoint=https://example.com
+    [ "$status" -eq 0 ]
+    grep -q "annotate crd instrumentations.opentelemetry.io.*helm.sh/resource-policy=keep" "$KUBECTL_CALLS_LOG"
+    grep -q "annotate crd opentelemetrycollectors.opentelemetry.io.*helm.sh/resource-policy=keep" "$KUBECTL_CALLS_LOG"
+    annotate_line=$(grep -n "annotate crd instrumentations.opentelemetry.io" "$KUBECTL_CALLS_LOG" | head -1 | cut -d: -f1)
+    helm_line=$(grep -n "upgrade --install opentelemetry-operator .*crds.create=false" "$KUBECTL_CALLS_LOG" | head -1 | cut -d: -f1)
+    [ -n "$annotate_line" ] && [ -n "$helm_line" ] && [ "$annotate_line" -lt "$helm_line" ]
+}
+
+@test "operator install on a clean cluster does not annotate CRDs or disable crds.create" {
+    run bash "$SCRIPT" operator-only token=tok endpoint=https://example.com
+    [ "$status" -eq 0 ]
+    ! grep -q "annotate crd" "$KUBECTL_CALLS_LOG"
+    ! grep -q "crds.create=false" "$HELM_CALLS_LOG"
+}

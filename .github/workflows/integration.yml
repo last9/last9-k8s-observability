@@ -91,6 +91,7 @@ jobs:
           - { mode: context,                helm: v3.14.0 }
           - { mode: existing-operator,      helm: v3.14.0 }
           - { mode: migrate-monitoring-only, helm: v3.14.0 }
+          - { mode: migrate-full,            helm: v3.14.0 }
           - { mode: customer-operator,      helm: v3.14.0 }
     steps:
       - uses: actions/checkout@v4

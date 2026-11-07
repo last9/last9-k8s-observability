@@ -15,6 +15,7 @@
 #   SIMULATE_PROXY_BLOCKED  "1" -> `get --raw` (apiserver proxy) fails; `port-forward` prints a fake local port
 #   SIMULATE_BUNDLED_PROMETHEUS  "1" -> a bundled Prometheus StatefulSet exists in the namespace
 #   SIMULATE_PORT_FORWARD_EXITS  "1" -> `port-forward` prints its Forwarding line then exits immediately
+#   SIMULATE_EXISTING_OTEL_CRDS  "1" -> OpenTelemetry CRDs already present on cluster
 #   MOCK_CONTEXT            value returned by `config current-context`
 
 # Record the full call (including any --context flag the wrapper injected)
@@ -46,6 +47,11 @@ case "$cmd" in
         [ "$SIMULATE_EXISTING_CRDS" = "1" ] && exit 0 || exit 1
         ;;
     "get crd -o name"*)
+        if [ "$SIMULATE_EXISTING_OTEL_CRDS" = "1" ]; then
+            printf '%s\n' \
+                "customresourcedefinition.apiextensions.k8s.io/instrumentations.opentelemetry.io" \
+                "customresourcedefinition.apiextensions.k8s.io/opentelemetrycollectors.opentelemetry.io"
+        fi
         if [ "$SIMULATE_EXISTING_CRDS" = "1" ]; then
             printf '%s\n' \
                 "customresourcedefinition.apiextensions.k8s.io/alertmanagerconfigs.monitoring.coreos.com" \

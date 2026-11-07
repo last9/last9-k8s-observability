@@ -1958,6 +1958,19 @@ install_operator() {
             --field-manager=helm -f -; then
             log_error "Failed to force-apply opentelemetry-operator CRDs (kubectl apply --server-side --force-conflicts)."
         fi
+
+        # Helm tracks these CRDs in the previous release manifest when the first
+        # install ran with crds.create=true. Upgrading with crds.create=false
+        # drops them from the manifest, so Helm would DELETE them and cascade-
+        # delete every Instrumentation / OpenTelemetryCollector CR. Helm skips
+        # deleting resources whose live object carries resource-policy=keep.
+        local otel_crd
+        while IFS= read -r otel_crd; do
+            [ -n "$otel_crd" ] || continue
+            if ! kubectl annotate crd "${otel_crd##*/}" helm.sh/resource-policy=keep --overwrite; then
+                log_error "Failed to annotate $otel_crd with helm.sh/resource-policy=keep; refusing to install with crds.create=false (Helm would delete the CRD and all its custom resources)."
+            fi
+        done < <(kubectl get crd -o name 2>/dev/null | grep '\.opentelemetry\.io$')
         disable_crds="yes"
     fi
 

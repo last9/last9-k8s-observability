@@ -23,7 +23,7 @@
 #                    Prometheus server), then monitoring-only; both must stay healthy
 #   migrate-monitoring-only  Install with the pinned pre-migration script (e1ad5c9), re-run the
 #                    current one, assert Prometheus gone / KSM untouched (needs working sink)
-#   migrate-full     Same, with the full-install path (KNOWN FAILING, not in 'all'; see test_migrate_full)
+#   migrate-full     Same, with the full-install path
 #   customer-operator  Customer prometheus-operator v0.81 in 'monitoring' must be untouched
 #   all              Run every mode above, each in its own cluster
 #
@@ -552,10 +552,6 @@ test_migrate_monitoring_only() {
     info "✓ migrate-monitoring-only passed"
 }
 
-# KNOWN FAILING, excluded from 'all' and the CI matrix: re-running a full install
-# hits a pre-existing operator-path bug (also present at e1ad5c9) -- the second
-# run's crds.create=false upgrade deletes the OpenTelemetry CRDs, so
-# create_instrumentation fails before monitoring setup is reached.
 test_migrate_full() {
     migrate_scenario migrate-full token="$DUMMY_TOKEN" endpoint="$DUMMY_OTLP"
     assert_rollout deployment opentelemetry-operator
@@ -667,6 +663,7 @@ main() {
             test_operator_crd_conflict;  cleanup_cluster
             test_existing_operator;      cleanup_cluster
             test_migrate_monitoring_only; cleanup_cluster
+            test_migrate_full;           cleanup_cluster
             test_customer_operator;      cleanup_cluster
             test_context
             ;;
