@@ -5,6 +5,7 @@ Render-level tests for the OTel metrics scraper Helm values.
 Run: uv run --with pyyaml python3 -m unittest tests/test_metrics_scraper_values.py -v
 """
 
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ COL_VERSION = "0.165.0"
 COL_IMAGE = "otel/opentelemetry-collector-contrib:0.156.0"
 TA_URL = "http://last9-target-allocator-ta.last9.svc:80"
 METRICS_VALUES = "last9-otel-metrics-values.yaml"
+FIXTURE = os.path.join(ROOT, "tests", "fixtures", "k8s-monitoring-values.e1ad5c9.yaml")
 
 
 def render(chart, version, values, release="rel"):
@@ -44,11 +46,13 @@ def ta_config(docs):
     return yaml.safe_load(cms[0]["data"]["targetallocator.yaml"])
 
 
+def read_fixture():
+    with open(FIXTURE) as f:
+        return f.read()
+
+
 def main_ec2_job():
-    src = subprocess.run(
-        ["git", "show", "origin/main:k8s-monitoring-values.yaml"],
-        check=True, capture_output=True, text=True, cwd=ROOT,
-    ).stdout
+    src = read_fixture()
     return yaml.safe_load(src)["prometheus"]["prometheusSpec"]["additionalScrapeConfigs"][0]
 
 
@@ -99,7 +103,8 @@ class TargetAllocatorValues(unittest.TestCase):
 
 def filled_values(alt=""):
     """Metrics values file with Task 3's placeholders substituted; returns temp path."""
-    src = open(os.path.join(ROOT, METRICS_VALUES)).read()
+    with open(os.path.join(ROOT, METRICS_VALUES)) as f:
+        src = f.read()
     for k, v in (("{{LAST9_METRICS_ENDPOINT}}", "https://rw.example/write"),
                  ("{{CLUSTER_NAME}}", "test-cluster"),
                  ("{{APP_METRICS_KEEP_ALT}}", alt)):
@@ -116,10 +121,7 @@ def collector_config(docs):
 
 
 def main_rw_regexes():
-    src = subprocess.run(
-        ["git", "show", "origin/main:k8s-monitoring-values.yaml"],
-        check=True, capture_output=True, text=True, cwd=ROOT,
-    ).stdout
+    src = read_fixture()
     cfgs = yaml.safe_load(src)["prometheus"]["prometheusSpec"]["remoteWrite"][0]["writeRelabelConfigs"]
     assert [c["action"] for c in cfgs] == ["keep", "drop"]
     return cfgs[0]["regex"], cfgs[1]["regex"]
@@ -142,7 +144,7 @@ class MetricsCollectorValues(unittest.TestCase):
         self.assertEqual(e["target_info"], {"enabled": False})
         self.assertIs(e["disable_scope_info"], True)
         self.assertEqual(e["external_labels"], {"cluster": "test-cluster"})
-        self.assertIn(e.get("resource_to_telemetry_conversion", {"enabled": False}), [{"enabled": False}])
+        self.assertEqual(e.get("resource_to_telemetry_conversion", {"enabled": False}), {"enabled": False})
 
     def test_receiver_uses_target_allocator(self):
         r = self.cfg["receivers"]["prometheus"]
@@ -159,7 +161,8 @@ class MetricsCollectorValues(unittest.TestCase):
             'not IsMatch(name, "^(' + keep + ')$")',
             'IsMatch(name, "^(' + drop + ')$")',
         ])
-        raw = open(os.path.join(ROOT, METRICS_VALUES)).read()
+        with open(os.path.join(ROOT, METRICS_VALUES)) as f:
+            raw = f.read()
         self.assertIn("^(" + keep + "{{APP_METRICS_KEEP_ALT}})$", raw)
         self.assertIn("^(" + drop + ")$", raw)
 
@@ -227,7 +230,6 @@ class MetricsCollectorContainer(unittest.TestCase):
         names = ["kube_pod_info", "node_cpu_seconds_total", "container_memory_failcnt", "my_app_requests_total"]
         gauge = lambda n: {"name": n, "gauge": {"dataPoints": [{"asInt": "1", "timeUnixNano": "1700000000000000000"}]}}
         otlp = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [gauge(n) for n in names]}]}]}
-        import json
         # ponytail: otlpjsonfile receiver instead of a prometheus scrape; the filter keys on metric name only
         cfg = {
             "receivers": {"otlpjsonfile": {"include": ["/in/m.json"], "start_at": "beginning"}},
@@ -239,8 +241,10 @@ class MetricsCollectorContainer(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as d:
             os.makedirs(f"{d}/in"); os.makedirs(f"{d}/out"); os.chmod(f"{d}/out", 0o777)
-            open(f"{d}/in/m.json", "w").write(json.dumps(otlp) + "\n")
-            yaml.safe_dump(cfg, open(f"{d}/config.yaml", "w"))
+            with open(f"{d}/in/m.json", "w") as f:
+                f.write(json.dumps(otlp) + "\n")
+            with open(f"{d}/config.yaml", "w") as f:
+                yaml.safe_dump(cfg, f)
             name = f"l9-filter-test-{os.getpid()}-{int(time.time())}"
             subprocess.run(["docker", "run", "-d", "--name", name, "-v", f"{d}:/c", "-v", f"{d}/in:/in",
                             "-v", f"{d}/out:/out", COL_IMAGE, "--config=/c/config.yaml"],
@@ -250,7 +254,10 @@ class MetricsCollectorContainer(unittest.TestCase):
                 for _ in range(30):
                     time.sleep(1)
                     p = f"{d}/out/out.json"
-                    out = open(p).read() if os.path.exists(p) else ""
+                    out = ""
+                    if os.path.exists(p):
+                        with open(p) as f:
+                            out = f.read()
                     if out.strip():
                         break
                 logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
