@@ -2543,8 +2543,8 @@ install_metrics_scraper() {
 # Returns 0 when healthy, 1 (after warning what is missing) on timeout.
 verify_metrics_scraper() {
     local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
-    local waited=0 missing configs pods pod metrics health totals sent failed
-    local prev_sent="" prev_failed=""
+    local waited=0 missing configs ids id pods pod metrics health obs unreadable verdict
+    local prev_obs=""
     local ta="svc/last9-target-allocator-ta" pf_dir
     pf_dir=$(mktemp -d)
     # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
@@ -2575,6 +2575,7 @@ verify_metrics_scraper() {
             for i in 1 2 3 4 5 6 7 8 9 10; do
                 port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$state.log" | head -1)
                 [ -n "$port" ] && break
+                kill -0 "$pid" 2>/dev/null || break
                 sleep 0.5
             done
         else
@@ -2611,34 +2612,60 @@ verify_metrics_scraper() {
             | grep -q '"targets": *\["' || missing="$missing kubelet-targets(0)"
         # The Target Allocator shards targets across collector replicas: read every replica's
         # telemetry (:8888) and local `up` exporter (:9465, pipeline metrics/scrape_health) and combine.
-        pods=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=last9-otel-metrics \
-            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
-        [ -n "${pods// /}" ] || missing="$missing collector-pods(0)"
-        metrics="" health=""
-        for pod in $pods; do
+        # A replica's identity (name/uid/restartCounts) changes when its process does.
+        ids=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=last9-otel-metrics -o \
+            jsonpath='{range .items[*]}{.metadata.name}{"/"}{.metadata.uid}{"/"}{range .status.containerStatuses[*]}{.restartCount}{","}{end}{"\n"}{end}' \
+            2>/dev/null || true)
+        pods=$(printf '%s\n' "$ids" | sed -n 's|^\([^/][^/]*\)/.*|\1|p')
+        [ -n "$pods" ] || missing="$missing collector-pods(0)"
+        obs="" health="" unreadable=""
+        # fd 3, so commands in the loop cannot consume the pod list from stdin.
+        while IFS= read -r id <&3; do
+            [ -n "$id" ] || continue
+            pod=${id%%/*}
             scraper_access "pod/$pod" 8888 /metrics
             scraper_access "pod/$pod" 9465 /metrics
-            metrics="$metrics$(scraper_get "pod/$pod" 8888 /metrics || true)"$'\n'
             health="$health$(scraper_get "pod/$pod" 9465 /metrics || true)"$'\n'
-        done
-        # Sum series by name prefix; collector 0.156 may or may not append _total.
-        # Only the remote-write exporter counts: the local scrape_health exporter
-        # also sends points, and those prove nothing about reaching Last9.
-        totals=$(printf '%s\n' "$metrics" | awk '
-            /^#/ || !/exporter="prometheusremotewrite\/last9"/ { next }
-            { n = $1; sub(/\{.*/, "", n) }
-            n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
-            n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
-            END { print sent + 0, failed + 0 }')
-        sent=${totals% *}; failed=${totals#* }
-        # Judge export health as a delta between consecutive polls: a cumulative failed>0
-        # from an earlier transient blip must not block forever.
-        if [ -z "$prev_sent" ]; then
-            missing="$missing collector-export(need 2 polls)"
-        elif ! awk -v s="$sent" -v ps="$prev_sent" -v f="$failed" -v pf="$prev_failed" 'BEGIN { exit !(s > ps && f <= pf) }'; then
-            missing="$missing collector-export(sent must grow, failed must not)"
+            metrics=$(scraper_get "pod/$pod" 8888 /metrics || true)
+            if ! printf '%s\n' "$metrics" | grep -q '^otelcol_'; then
+                unreadable="$unreadable $pod"
+                continue
+            fi
+            # Only the remote-write exporter counts: the local scrape_health exporter also sends
+            # points, and those prove nothing about reaching Last9. Collector 0.156 may or may not
+            # append _total; a series not created yet counts as 0.
+            obs="$obs$id $(printf '%s\n' "$metrics" | awk '
+                /^#/ || !/exporter="prometheusremotewrite\/last9"/ { next }
+                { n = $1; sub(/\{.*/, "", n) }
+                n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
+                n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
+                END { print sent + 0, failed + 0 }')"$'\n'
+        done 3<<< "$ids"
+        # Judge export health as per-replica deltas between consecutive complete polls: a cumulative
+        # failed>0 from an earlier blip must not block forever, and a total that grows only because a
+        # replica's counters reappeared, were replaced or reset proves no fresh write to Last9.
+        if [ -n "$unreadable" ]; then
+            missing="$missing collector-export(telemetry unreadable:${unreadable# })"
+            obs=""
+        elif [ -z "$prev_obs" ]; then
+            missing="$missing collector-export(need 2 complete polls)"
+        else
+            verdict=$(printf '%s\n%s' "$prev_obs" "$obs" | awk -v nprev="$(printf '%s' "$prev_obs" | grep -c .)" '
+                NF != 3 { next }
+                ++line <= nprev { ps[$1] = $2; pf[$1] = $3; next }
+                { seen[$1] = 1
+                  if (!($1 in ps)) { changed = 1; next }
+                  if ($2 < ps[$1] || $3 < pf[$1]) reset = 1
+                  grew += $2 - ps[$1]; if ($3 > pf[$1]) failing = 1 }
+                END {
+                    for (id in ps) if (!(id in seen)) changed = 1
+                    if (changed) print "replicas changed"
+                    else if (reset) print "counter reset"
+                    else if (grew <= 0 || failing) print "sent must grow, failed must not"
+                }')
+            [ -z "$verdict" ] || missing="$missing collector-export($verdict)"
         fi
-        prev_sent=$sent; prev_failed=$failed
+        prev_obs=$obs
         # Exports alone are not proof: a blocked scrape still exports a synthetic up=0.
         # Require a successful scrape (up == 1) of each core target this release ships.
         missing="$missing$(printf '%s' "$health" | NS="$NAMESPACE" awk '
