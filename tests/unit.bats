@@ -675,7 +675,7 @@ YAML
 
 @test "inject_monitoring_tls: adds tlsConfig.serverName under remoteWrite url" {
     tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    cp "$BATS_TEST_DIRNAME/fixtures/k8s-monitoring-values.e1ad5c9.yaml" "$tmpdir/k8s-monitoring-values.yaml"
     func_body=$(monitoring_tls_func)
     run bash -c "
         cd '$tmpdir'
@@ -730,7 +730,7 @@ YAML
 
 @test "inject_monitoring_tls: no-op and byte-identical when SERVER_NAME empty" {
     tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/orig.yaml"
+    cp "$BATS_TEST_DIRNAME/fixtures/k8s-monitoring-values.e1ad5c9.yaml" "$tmpdir/orig.yaml"
     cp "$tmpdir/orig.yaml" "$tmpdir/k8s-monitoring-values.yaml"
     func_body=$(monitoring_tls_func)
     run bash -c "
@@ -777,7 +777,7 @@ YAML
 
 @test "inject_monitoring_tls: idempotent on re-run (single serverName)" {
     tmpdir=$(mktemp -d)
-    cp "$BATS_TEST_DIRNAME/../k8s-monitoring-values.yaml" "$tmpdir/k8s-monitoring-values.yaml"
+    cp "$BATS_TEST_DIRNAME/fixtures/k8s-monitoring-values.e1ad5c9.yaml" "$tmpdir/k8s-monitoring-values.yaml"
     func_body=$(monitoring_tls_func)
     run bash -c "
         cd '$tmpdir'

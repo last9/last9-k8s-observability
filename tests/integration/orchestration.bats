@@ -16,6 +16,8 @@ setup() {
     export PATH="$STUBS:$PATH"
     export REPO_SRC="$REPO_ROOT"
     export HELM_INSTALL_RETRY_DELAY=0
+    # Healthy scraper by default so monitoring flows pass verify quickly; tests override as needed.
+    export SIMULATE_SCRAPER_HEALTHY=1 VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
 
     # Per-test call logs
     export KUBECTL_CALLS_LOG="$BATS_TEST_TMPDIR/kubectl.log"
@@ -301,6 +303,7 @@ run_scraper() {
 }
 
 @test "verify_metrics_scraper warns and fails on timeout" {
+    unset SIMULATE_SCRAPER_HEALTHY
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
     run bash "$SCRIPT" function=verify_metrics_scraper
     [ "$status" -ne 0 ]
@@ -382,6 +385,7 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
 }
 
 @test "fresh install: verify failure exits non-zero with a clear message" {
+    unset SIMULATE_SCRAPER_HEALTHY
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
     run_monitoring_only
     [ "$status" -ne 0 ]
@@ -390,6 +394,7 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
 }
 
 @test "verify failure leaves prometheus running" {
+    unset SIMULATE_SCRAPER_HEALTHY
     export SIMULATE_EXISTING_MONITORING_RELEASE=1
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
     run_monitoring_only
@@ -400,6 +405,7 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
 }
 
 @test "re-run after verify failure completes migration" {
+    unset SIMULATE_SCRAPER_HEALTHY
     export SIMULATE_EXISTING_MONITORING_RELEASE=1
     export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
     run_monitoring_only
@@ -423,4 +429,16 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     run bash "$SCRIPT" operator-only token=tok endpoint=https://example.com
     run bash "$SCRIPT" events-only
     ! grep -q "last9-otel-metrics\|last9-target-allocator" "$HELM_CALLS_LOG"
+}
+
+@test "server-name= adds tls server_name_override to the metrics exporter" {
+    run_scraper server-name=ingest.example.internal
+    [ "$status" -eq 0 ]
+    grep -q 'server_name_override: "ingest.example.internal"' "${HELM_CALLS_LOG}.values.last9-otel-metrics"
+}
+
+@test "no server-name= means no server_name_override in metrics values" {
+    run_scraper
+    [ "$status" -eq 0 ]
+    ! grep -q 'server_name_override' "${HELM_CALLS_LOG}.values.last9-otel-metrics"
 }

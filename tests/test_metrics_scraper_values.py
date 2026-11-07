@@ -221,6 +221,26 @@ class MetricsCollectorContainer(unittest.TestCase):
                                 "validate", "--config=/c/config.yaml"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_config_with_server_name_validates(self):
+        # Render through the real install_metrics_scraper (stub helm captures the values file).
+        stubs = os.path.join(ROOT, "tests", "integration", "stubs")
+        with tempfile.TemporaryDirectory() as w:
+            env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "REPO_SRC": ROOT,
+                   "HELM_CALLS_LOG": f"{w}/helm.log", "HELM_INSTALL_RETRY_DELAY": "0"}
+            subprocess.run(["bash", os.path.join(ROOT, "last9-otel-setup.sh"), "function=install_metrics_scraper",
+                            "token=t", "endpoint=https://e.example", "monitoring-endpoint=https://rw.example/write",
+                            "cluster=test-cluster", "server-name=ingest.example.internal"],
+                           cwd=w, env=env, check=True, capture_output=True)
+            vals = f"{w}/helm.log.values.last9-otel-metrics"
+            cfg = collector_config(render(COL_CHART, COL_VERSION, vals, release="last9-otel-metrics"))
+            self.assertEqual(cfg["exporters"]["prometheusremotewrite/last9"]["tls"],
+                             {"server_name_override": "ingest.example.internal"})
+            with open(f"{w}/config.yaml", "w") as f:
+                yaml.safe_dump(cfg, f)
+            r = subprocess.run(["docker", "run", "--rm", *ENV, "-v", f"{w}:/c", COL_IMAGE,
+                                "validate", "--config=/c/config.yaml"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def _survivors(self, alt):
         vals = filled_values(alt)
         try:

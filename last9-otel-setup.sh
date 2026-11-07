@@ -2603,6 +2603,11 @@ install_metrics_scraper() {
     replace_literal_in_file "$col_values" "{{LAST9_METRICS_ENDPOINT}}" "$MONITORING_ENDPOINT"
     replace_literal_in_file "$col_values" "{{CLUSTER_NAME}}" "$cluster_name"
     replace_literal_in_file "$col_values" "{{APP_METRICS_KEEP_ALT}}" "$keep_alt"
+    if [ -n "$SERVER_NAME" ]; then
+        # server-name= keeps its meaning: TLS SNI/verification override on the remote-write exporter.
+        S="$SERVER_NAME" awk '{ print } /^      endpoint: / && !d { print "      tls:"; print "        server_name_override: \"" ENVIRON["S"] "\""; d = 1 }' \
+            "$col_values" > "${col_values}.tmp" && mv "${col_values}.tmp" "$col_values"
+    fi
 
     # Tolerations/nodeSelector: both charts take them at the values root.
     local -a scheduling_args=()

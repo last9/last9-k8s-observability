@@ -216,7 +216,7 @@ Use `server-name=` when your OTLP / metrics endpoint terminates TLS behind a pro
 When set, it injects (only into the files being installed):
 
 - `tls.server_name_override` (with `insecure: false`) under the `otlp/last9` exporter in the collector and events-agent configs.
-- Not applied to the OTel metrics scraper (`last9-otel-metrics-values.yaml`); set the exporter TLS server name there manually if needed.
+- `tls.server_name_override` under the `prometheusremotewrite/last9` exporter in the metrics scraper (`last9-otel-metrics`) config.
 
 When omitted (the default), no TLS block is added and the values files are unchanged — fully backward compatible.
 
@@ -241,7 +241,7 @@ helm get values last9-kube-events-agent -n last9 -o yaml > events-values.yaml
 helm upgrade last9-kube-events-agent open-telemetry/opentelemetry-collector \
   -n last9 -f events-values.yaml --reuse-values=false
 
-# Metrics scraper (last9-otel-metrics): add the same tls block under the prometheusremotewrite exporter
+# Metrics scraper (last9-otel-metrics): add the same tls block under the prometheusremotewrite/last9 exporter
 helm get values last9-otel-metrics -n last9 -o yaml > metrics-values.yaml
 helm upgrade last9-otel-metrics open-telemetry/opentelemetry-collector \
   -n last9 -f metrics-values.yaml --reuse-values=false
