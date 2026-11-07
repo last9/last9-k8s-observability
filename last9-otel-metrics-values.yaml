@@ -1,0 +1,138 @@
+# OTel Collector that scrapes ServiceMonitors/PodMonitors via the Target Allocator and
+# remote-writes to Last9 with the SAME metric names the bundled Prometheus produced.
+# Chart: open-telemetry/opentelemetry-collector $COLLECTOR_VERSION, release `last9-otel-metrics`, namespace `last9`.
+# First pod: last9-otel-metrics-0.
+# Placeholders filled by last9-otel-setup.sh: {{LAST9_METRICS_ENDPOINT}}, {{CLUSTER_NAME}}, {{APP_METRICS_KEEP_ALT}}
+# ({{APP_METRICS_KEEP_ALT}} becomes "" or "|<regex>" inside the keep alternation).
+# Target Allocator: http://last9-target-allocator-ta.last9.svc:80  (see last9-target-allocator-values.yaml)
+# The `$` regex anchors are a lone `$` (not `${`), so collector env-expansion leaves them intact.
+mode: statefulset
+replicaCount: 1
+fullnameOverride: last9-otel-metrics
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+command:
+  name: otelcol-contrib
+
+# kubelet ServiceMonitor scrapes https with the SA bearer token
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+
+clusterRole:
+  create: true
+  rules:
+    - apiGroups: [""]
+      resources: [nodes, nodes/metrics, nodes/proxy]
+      verbs: [get, list, watch]
+    - nonResourceURLs: [/metrics, /metrics/cadvisor]
+      verbs: [get]
+
+ports:
+  otlp:
+    enabled: false
+  otlp-http:
+    enabled: false
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+extraEnvs:
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: LAST9_RW_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: last9-remote-write-secret
+        key: username
+  - name: LAST9_RW_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: last9-remote-write-secret
+        key: password
+
+config:
+  extensions:
+    basicauth/last9_metrics:
+      client_auth:
+        username: ${env:LAST9_RW_USERNAME}
+        password: ${env:LAST9_RW_PASSWORD}
+
+  receivers:
+    otlp: null
+    jaeger: null
+    zipkin: null
+    prometheus:
+      config:
+        scrape_configs: []   # override chart default self-scrape job
+      target_allocator:
+        endpoint: http://last9-target-allocator-ta.last9.svc:80
+        interval: 30s
+        collector_id: ${env:POD_NAME}
+      # no scrape_configs: all jobs (ServiceMonitors + ec2-metadata) come from the Target Allocator
+
+  processors:
+    memory_limiter:
+      check_interval: 5s
+      limit_percentage: 85
+      spike_limit_percentage: 15
+    batch:
+      send_batch_size: 15000
+      send_batch_max_size: 15000
+      timeout: 10s
+    # Same keep/drop as the bundled Prometheus remoteWrite.writeRelabelConfigs (k8s-monitoring-values.yaml).
+    filter/last9_keep:
+      error_mode: ignore
+      metrics:
+        metric:
+          - 'not IsMatch(name, "^(up|container_.*|kubelet_volume_stats_.*|namedprocess_.*|node_boot_time_seconds|node_context_switches_total|node_cpu_seconds_total|node_disk_io_time_seconds_total|node_disk_read_bytes_total|node_disk_read_time_seconds_total|node_disk_reads_completed_total|node_disk_write_time_seconds_total|node_disk_writes_completed_total|node_disk_written_bytes_total|node_filefd_allocated|node_filesystem_free_bytes|node_filesystem_size_bytes|node_load1|node_load5|node_load15|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_netstat_Tcp_CurrEstab|node_netstat_Tcp_InSegs|node_netstat_Tcp_OutSegs|node_netstat_Tcp_RetransSegs|node_network_receive_bytes_total|node_network_transmit_bytes_total|node_sockstat_sockets_used|node_sockstat_TCP_alloc|node_sockstat_TCP_tw|node_sockstat_UDP_inuse|node_uname_info|kube_deployment_spec_replicas|kube_deployment_status_replicas_ready|kube_deployment_status_replicas_updated|kube_pod_container_info|kube_pod_container_resource_limits|kube_pod_container_resource_limits_memory_bytes|kube_pod_container_resource_requests|kube_pod_container_resource_requests_memory_bytes|kube_pod_container_status_last_terminated_reason|kube_pod_container_status_restarts_total|kube_pod_container_status_running|kube_pod_container_status_terminated|kube_pod_container_status_terminated_reason|kube_pod_container_status_waiting_reason|kube_pod_created|kube_pod_info|kube_pod_owner|kube_pod_status_phase|kube_state_metrics_total_shards|kube_statefulset_created|kube_statefulset_info|kube_statefulset_replicas|kube_statefulset_spec_replicas|kube_statefulset_status_replicas_available|kube_statefulset_status_replicas_ready|kube_statefulset_status_replicas_unavailable|kube_statefulset_status_replicas_updated{{APP_METRICS_KEEP_ALT}})$")'
+          - 'IsMatch(name, "^(container_(memory_failures_total|blkio_device_usage_total|last_seen|memory_failcnt|sockets|memory_kernel_usage|memory_cache))$")'
+
+  exporters:
+    debug: null
+    prometheusremotewrite/last9:
+      endpoint: "{{LAST9_METRICS_ENDPOINT}}"
+      auth:
+        authenticator: basicauth/last9_metrics
+      translation_strategy: UnderscoreEscapingWithoutSuffixes
+      target_info:
+        enabled: false
+      disable_scope_info: true
+      external_labels:
+        cluster: "{{CLUSTER_NAME}}"
+      remote_write_queue:
+        enabled: true
+        queue_size: 10000
+        num_consumers: 5
+      retry_on_failure:
+        enabled: true
+        initial_interval: 5s
+        max_interval: 30s
+        max_elapsed_time: 300s
+
+  service:
+    extensions: [health_check, basicauth/last9_metrics]
+    pipelines:
+      traces: null
+      logs: null
+      metrics:
+        receivers: [prometheus]
+        processors: [memory_limiter, filter/last9_keep, batch]
+        exporters: [prometheusremotewrite/last9]

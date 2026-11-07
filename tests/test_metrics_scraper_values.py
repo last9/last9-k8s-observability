@@ -6,7 +6,11 @@ Run: uv run --with pyyaml python3 -m unittest tests/test_metrics_scraper_values.
 """
 
 import os
+import re
+import shutil
 import subprocess
+import tempfile
+import time
 import unittest
 
 import yaml
@@ -14,12 +18,18 @@ import yaml
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TA_CHART = "open-telemetry/opentelemetry-target-allocator"
 TA_VERSION = "0.156.0"
+COL_CHART = "open-telemetry/opentelemetry-collector"
+COL_VERSION = "0.165.0"
+COL_IMAGE = "otel/opentelemetry-collector-contrib:0.156.0"
+TA_URL = "http://last9-target-allocator-ta.last9.svc:80"
+METRICS_VALUES = "last9-otel-metrics-values.yaml"
 
 
-def render(chart, version, values):
+def render(chart, version, values, release="rel"):
+    path = values if os.path.isabs(values) else os.path.join(ROOT, values)
     out = subprocess.run(
-        ["helm", "template", "rel", chart, "--version", version,
-         "--namespace", "last9", "-f", os.path.join(ROOT, values)],
+        ["helm", "template", release, chart, "--version", version,
+         "--namespace", "last9", "-f", path],
         check=True, capture_output=True, text=True,
     ).stdout
     return [d for d in yaml.safe_load_all(out) if d]
@@ -85,6 +95,174 @@ class TargetAllocatorValues(unittest.TestCase):
     def test_ta_service_name(self):
         # chart hardcodes the "-ta" suffix on the Service name (<fullname>-ta)
         self.assertIn("last9-target-allocator-ta", [s["metadata"]["name"] for s in kind(self.docs, "Service")])
+
+
+def filled_values(alt=""):
+    """Metrics values file with Task 3's placeholders substituted; returns temp path."""
+    src = open(os.path.join(ROOT, METRICS_VALUES)).read()
+    for k, v in (("{{LAST9_METRICS_ENDPOINT}}", "https://rw.example/write"),
+                 ("{{CLUSTER_NAME}}", "test-cluster"),
+                 ("{{APP_METRICS_KEEP_ALT}}", alt)):
+        src = src.replace(k, v)
+    f = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+    f.write(src)
+    f.close()
+    return f.name
+
+
+def collector_config(docs):
+    cms = [d for d in kind(docs, "ConfigMap") if "relay" in d["data"]]
+    return yaml.safe_load(cms[0]["data"]["relay"])
+
+
+def main_rw_regexes():
+    src = subprocess.run(
+        ["git", "show", "origin/main:k8s-monitoring-values.yaml"],
+        check=True, capture_output=True, text=True, cwd=ROOT,
+    ).stdout
+    cfgs = yaml.safe_load(src)["prometheus"]["prometheusSpec"]["remoteWrite"][0]["writeRelabelConfigs"]
+    assert [c["action"] for c in cfgs] == ["keep", "drop"]
+    return cfgs[0]["regex"], cfgs[1]["regex"]
+
+
+class MetricsCollectorValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.vals = filled_values()
+        cls.docs = render(COL_CHART, COL_VERSION, cls.vals, release="last9-otel-metrics")
+        cls.cfg = collector_config(cls.docs)
+
+    @classmethod
+    def tearDownClass(cls):
+        os.unlink(cls.vals)
+
+    def test_exporter_parity(self):
+        e = self.cfg["exporters"]["prometheusremotewrite/last9"]
+        self.assertEqual(e["translation_strategy"], "UnderscoreEscapingWithoutSuffixes")
+        self.assertEqual(e["target_info"], {"enabled": False})
+        self.assertIs(e["disable_scope_info"], True)
+        self.assertEqual(e["external_labels"], {"cluster": "test-cluster"})
+        self.assertIn(e.get("resource_to_telemetry_conversion", {"enabled": False}), [{"enabled": False}])
+
+    def test_receiver_uses_target_allocator(self):
+        r = self.cfg["receivers"]["prometheus"]
+        ta = r["target_allocator"]
+        self.assertEqual(ta["endpoint"], TA_URL)
+        self.assertEqual(ta["interval"], "30s")
+        self.assertEqual(ta["collector_id"], "${env:POD_NAME}")
+        self.assertFalse(r.get("config", {}).get("scrape_configs"))
+
+    def test_keep_drop_match_origin_main(self):
+        keep, drop = main_rw_regexes()
+        conds = self.cfg["processors"]["filter/last9_keep"]["metrics"]["metric"]
+        self.assertEqual(conds, [
+            'not IsMatch(name, "^(' + keep + ')$")',
+            'IsMatch(name, "^(' + drop + ')$")',
+        ])
+        raw = open(os.path.join(ROOT, METRICS_VALUES)).read()
+        self.assertIn("^(" + keep + "{{APP_METRICS_KEEP_ALT}})$", raw)
+        self.assertIn("^(" + drop + ")$", raw)
+
+    def test_pipeline_order(self):
+        p = self.cfg["service"]["pipelines"]
+        self.assertEqual(list(p), ["metrics"])
+        self.assertEqual(p["metrics"], {
+            "receivers": ["prometheus"],
+            "processors": ["memory_limiter", "filter/last9_keep", "batch"],
+            "exporters": ["prometheusremotewrite/last9"],
+        })
+
+    def test_credentials_from_secret(self):
+        sts = kind(self.docs, "StatefulSet")[0]
+        env = {e["name"]: e for e in sts["spec"]["template"]["spec"]["containers"][0]["env"]}
+        for name, key in (("LAST9_RW_USERNAME", "username"), ("LAST9_RW_PASSWORD", "password")):
+            self.assertEqual(env[name]["valueFrom"]["secretKeyRef"],
+                             {"name": "last9-remote-write-secret", "key": key})
+        self.assertEqual(env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"], "metadata.name")
+        ba = self.cfg["extensions"]["basicauth/last9_metrics"]["client_auth"]
+        self.assertEqual(ba, {"username": "${env:LAST9_RW_USERNAME}", "password": "${env:LAST9_RW_PASSWORD}"})
+
+    def test_statefulset_identity(self):
+        sts = kind(self.docs, "StatefulSet")[0]
+        self.assertEqual(sts["metadata"]["name"], "last9-otel-metrics")
+        self.assertEqual(sts["spec"]["replicas"], 1)
+
+    def test_kubelet_scrape_rbac(self):
+        rules = [r for cr in kind(self.docs, "ClusterRole") for r in cr["rules"]]
+        for res in ("nodes/metrics", "nodes/proxy"):
+            self.assertTrue(any(res in r.get("resources", []) and "get" in r["verbs"] for r in rules), res)
+        sas = [d for d in kind(self.docs, "ServiceAccount")]
+        self.assertTrue(sas)
+        sts = kind(self.docs, "StatefulSet")[0]
+        self.assertIsNot(sts["spec"]["template"]["spec"].get("automountServiceAccountToken"), False)
+        self.assertIsNot(sas[0].get("automountServiceAccountToken"), False)
+
+
+ENV = ["-e", "MY_POD_IP=127.0.0.1", "-e", "POD_NAME=t-0", "-e", "LAST9_RW_USERNAME=u",
+       "-e", "LAST9_RW_PASSWORD=p"]
+HAVE_DOCKER = shutil.which("docker") is not None
+
+
+@unittest.skipUnless(HAVE_DOCKER, "docker not available")
+class MetricsCollectorContainer(unittest.TestCase):
+    def test_config_validates(self):
+        vals = filled_values()
+        try:
+            cfg = collector_config(render(COL_CHART, COL_VERSION, vals, release="last9-otel-metrics"))
+        finally:
+            os.unlink(vals)
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "config.yaml"), "w") as f:
+                yaml.safe_dump(cfg, f)
+            r = subprocess.run(["docker", "run", "--rm", *ENV, "-v", f"{d}:/c", COL_IMAGE,
+                                "validate", "--config=/c/config.yaml"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def _survivors(self, alt):
+        vals = filled_values(alt)
+        try:
+            flt = collector_config(render(COL_CHART, COL_VERSION, vals, release="x"))["processors"]["filter/last9_keep"]
+        finally:
+            os.unlink(vals)
+        names = ["kube_pod_info", "node_cpu_seconds_total", "container_memory_failcnt", "my_app_requests_total"]
+        gauge = lambda n: {"name": n, "gauge": {"dataPoints": [{"asInt": "1", "timeUnixNano": "1700000000000000000"}]}}
+        otlp = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [gauge(n) for n in names]}]}]}
+        import json
+        # ponytail: otlpjsonfile receiver instead of a prometheus scrape; the filter keys on metric name only
+        cfg = {
+            "receivers": {"otlpjsonfile": {"include": ["/in/m.json"], "start_at": "beginning"}},
+            "processors": {"filter/last9_keep": flt},
+            "exporters": {"file": {"path": "/out/out.json"}},
+            "service": {"pipelines": {"metrics": {"receivers": ["otlpjsonfile"],
+                                                  "processors": ["filter/last9_keep"],
+                                                  "exporters": ["file"]}}},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(f"{d}/in"); os.makedirs(f"{d}/out"); os.chmod(f"{d}/out", 0o777)
+            open(f"{d}/in/m.json", "w").write(json.dumps(otlp) + "\n")
+            yaml.safe_dump(cfg, open(f"{d}/config.yaml", "w"))
+            name = f"l9-filter-test-{os.getpid()}-{int(time.time())}"
+            subprocess.run(["docker", "run", "-d", "--name", name, "-v", f"{d}:/c", "-v", f"{d}/in:/in",
+                            "-v", f"{d}/out:/out", COL_IMAGE, "--config=/c/config.yaml"],
+                           check=True, capture_output=True)
+            try:
+                out = ""
+                for _ in range(30):
+                    time.sleep(1)
+                    p = f"{d}/out/out.json"
+                    out = open(p).read() if os.path.exists(p) else ""
+                    if out.strip():
+                        break
+                logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+                self.assertTrue(out.strip(), logs.stdout + logs.stderr)
+            finally:
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        return set(re.findall(r'"name":"([^"]+)"', out))
+
+    def test_filter_semantics(self):
+        self.assertEqual(self._survivors(""), {"kube_pod_info", "node_cpu_seconds_total"})
+        self.assertEqual(self._survivors("|my_app_.*"),
+                         {"kube_pod_info", "node_cpu_seconds_total", "my_app_requests_total"})
 
 
 if __name__ == "__main__":
