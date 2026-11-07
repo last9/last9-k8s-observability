@@ -570,3 +570,12 @@ SH
     [ "$status" -eq 0 ]
     ! grep -q 'server_name_override' "${HELM_CALLS_LOG}.values.last9-otel-metrics"
 }
+
+@test "fresh-path verify survives port-forwards that already exited (trap kill under set -e)" {
+    unset SIMULATE_SCRAPER_HEALTHY
+    export SIMULATE_PROXY_BLOCKED=1 SIMULATE_PORT_FORWARD_EXITS=1
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    run_monitoring_only
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deployed but NOT verified"* ]]
+}

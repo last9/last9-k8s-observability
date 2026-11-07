@@ -2412,7 +2412,7 @@ setup_last9_monitoring() {
     if [ "$migrating" = true ]; then
         log_info "Existing last9-k8s-monitoring release found: migrating to the OTel metrics scraper"
         if ! install_metrics_scraper "$cluster_name" || ! verify_metrics_scraper; then
-            if [ -n "$(kubectl get statefulset -n "$NAMESPACE" -l app.kubernetes.io/name=prometheus -o name 2>/dev/null)" ]; then
+            if [ -n "$(kubectl get statefulset -n "$NAMESPACE" -l operator.prometheus.io/name -o name 2>/dev/null)" ]; then
                 log_error "OTel metrics scraper did not become healthy. The bundled Prometheus is still running and was not modified. Fix the issue above and re-run this script."
             else
                 log_error "OTel metrics scraper did not become healthy and no bundled Prometheus is running, so cluster metrics may not be reaching Last9. Fix the issue above and re-run this script."
@@ -2594,7 +2594,7 @@ verify_metrics_scraper() {
     pf_dir=$(mktemp -d)
     # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
     # on a random free local port. Forwards are reused across polls and always killed on return.
-    trap '[ -n "$ta_pid" ] && kill "$ta_pid" 2>/dev/null; [ -n "$col_pid" ] && kill "$col_pid" 2>/dev/null; rm -rf "$pf_dir"; trap - RETURN' RETURN
+    trap '{ [ -z "$ta_pid" ] || kill "$ta_pid" 2>/dev/null || true; }; { [ -z "$col_pid" ] || kill "$col_pid" 2>/dev/null || true; }; rm -rf "$pf_dir"; trap - RETURN' RETURN
 
     # $1 = ta|col. Runs in the main shell (state lives in the ta_*/col_* vars): prefers the
     # apiserver proxy; otherwise (re)starts a port-forward and records its local port.
@@ -2606,7 +2606,7 @@ verify_metrics_scraper() {
             probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid
         fi
         if kubectl get --raw "$probe" >/dev/null 2>&1; then
-            [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            { [ -z "$pid" ] || kill "$pid" 2>/dev/null || true; }
             pid=""
         elif [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
             : > "$log"

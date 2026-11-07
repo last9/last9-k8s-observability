@@ -14,6 +14,7 @@
 #   SIMULATE_KUBELET_SVC / SIMULATE_KUBELET_SVC_MANAGED_BY  orphaned operator kubelet Service in kube-system
 #   SIMULATE_PROXY_BLOCKED  "1" -> `get --raw` (apiserver proxy) fails; `port-forward` prints a fake local port
 #   SIMULATE_BUNDLED_PROMETHEUS  "1" -> a bundled Prometheus StatefulSet exists in the namespace
+#   SIMULATE_PORT_FORWARD_EXITS  "1" -> `port-forward` prints its Forwarding line then exits immediately
 #   MOCK_CONTEXT            value returned by `config current-context`
 
 # Record the full call (including any --context flag the wrapper injected)
@@ -60,6 +61,7 @@ case "$cmd" in
     "port-forward "*)
         # Fake forward: svc/* -> 11111, pod/* -> 22222; stays alive until the script kills it
         case "$cmd" in *svc/*) echo "Forwarding from 127.0.0.1:11111 -> 80";; *) echo "Forwarding from 127.0.0.1:22222 -> 8888";; esac
+        [ "$SIMULATE_PORT_FORWARD_EXITS" = "1" ] && exit 0
         exec sleep 30
         ;;
     "get --raw "*"/scrape_configs")
@@ -67,8 +69,8 @@ case "$cmd" in
         [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ] && echo "${SIMULATE_SCRAPE_CONFIGS:-$default_cfg}"
         exit 0
         ;;
-    "get statefulset -n "*" -l app.kubernetes.io/name=prometheus -o name")
-        [ "$SIMULATE_BUNDLED_PROMETHEUS" = "1" ] && echo "statefulset.apps/prometheus-last9-k8s-monitoring-kube-prometheus"
+    "get statefulset -n "*" -l operator.prometheus.io/name -o name")
+        [ "$SIMULATE_BUNDLED_PROMETHEUS" = "1" ] && echo "statefulset.apps/prom-agent-last9-k8s-monitoring-kube-prometheus"
         exit 0
         ;;
     "get --raw "*"/jobs/kubelet/targets")
