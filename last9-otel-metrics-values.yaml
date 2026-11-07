@@ -119,6 +119,14 @@ config:
         datapoint:
           - 'resource.attributes["service.name"] == "kubelet" and attributes["service"] != "last9-k8s-monitoring-kube-kubelet"'
 
+    # Scrape health for the installer: a failed scrape still yields a synthetic up=0 that exports
+    # fine, so export counters alone cannot prove the collector reaches its targets.
+    filter/scrape_health:
+      error_mode: ignore
+      metrics:
+        metric:
+          - 'name != "up"'
+
   exporters:
     debug: null
     prometheusremotewrite/last9:
@@ -140,6 +148,10 @@ config:
         initial_interval: 5s
         max_interval: 30s
         max_elapsed_time: 300s
+    # Per-target `up` on :9465, read by last9-otel-setup.sh (verify_metrics_scraper) through the pod proxy.
+    prometheus/scrape_health:
+      endpoint: 0.0.0.0:9465
+      metric_expiration: 3m
 
   service:
     extensions: [health_check, basicauth/last9_metrics]
@@ -150,3 +162,7 @@ config:
         receivers: [prometheus]
         processors: [memory_limiter, filter/last9_keep, filter/last9_kubelet_dedup, batch]
         exporters: [prometheusremotewrite/last9]
+      metrics/scrape_health:
+        receivers: [prometheus]
+        processors: [filter/scrape_health]
+        exporters: [prometheus/scrape_health]

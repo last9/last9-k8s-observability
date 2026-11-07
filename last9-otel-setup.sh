@@ -2546,21 +2546,23 @@ verify_metrics_scraper() {
     local prev_sent="" prev_failed=""
     local ta_proxy="/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy"
     local col_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy"
-    local pf_dir ta_pid="" col_pid="" ta_port="" col_port=""
+    # Collector's local `up` exporter (pipeline metrics/scrape_health in last9-otel-metrics-values.yaml)
+    local health_proxy="/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:9465/proxy"
+    local pf_dir ta_pid="" col_pid="" health_pid="" ta_port="" col_port="" health_port=""
     pf_dir=$(mktemp -d)
     # The apiserver proxy is blocked on some private clusters; fall back to kubectl port-forward
     # on a random free local port. Forwards are reused across polls and always killed on return.
-    trap '{ [ -z "$ta_pid" ] || kill "$ta_pid" 2>/dev/null || true; }; { [ -z "$col_pid" ] || kill "$col_pid" 2>/dev/null || true; }; rm -rf "$pf_dir"; trap - RETURN' RETURN
+    trap '{ [ -z "$ta_pid" ] || kill "$ta_pid" 2>/dev/null || true; }; { [ -z "$col_pid" ] || kill "$col_pid" 2>/dev/null || true; }; { [ -z "$health_pid" ] || kill "$health_pid" 2>/dev/null || true; }; rm -rf "$pf_dir"; trap - RETURN' RETURN
 
-    # $1 = ta|col. Runs in the main shell (state lives in the ta_*/col_* vars): prefers the
-    # apiserver proxy; otherwise (re)starts a port-forward and records its local port.
+    # $1 = ta|col|health. Runs in the main shell (state lives in the <who>_pid/<who>_port vars):
+    # prefers the apiserver proxy; otherwise (re)starts a port-forward and records its local port.
     scraper_access() {
         local who="$1" probe ref rport pid port="" i log="$pf_dir/$1.log"
-        if [ "$who" = ta ]; then
-            probe="$ta_proxy/scrape_configs"; ref="svc/last9-target-allocator-ta"; rport=80; pid=$ta_pid
-        else
-            probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid
-        fi
+        case "$who" in
+            ta) probe="$ta_proxy/scrape_configs"; ref="svc/last9-target-allocator-ta"; rport=80; pid=$ta_pid ;;
+            col) probe="$col_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=8888; pid=$col_pid ;;
+            health) probe="$health_proxy/metrics"; ref="pod/last9-otel-metrics-0"; rport=9465; pid=$health_pid ;;
+        esac
         if kubectl get --raw "$probe" >/dev/null 2>&1; then
             { [ -z "$pid" ] || kill "$pid" 2>/dev/null || true; }
             pid=""
@@ -2576,13 +2578,21 @@ verify_metrics_scraper() {
         else
             port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9][0-9]*\) .*/\1/p' "$log" | head -1)
         fi
-        if [ "$who" = ta ]; then ta_pid=$pid; ta_port=$port; else col_pid=$pid; col_port=$port; fi
+        case "$who" in
+            ta) ta_pid=$pid; ta_port=$port ;;
+            col) col_pid=$pid; col_port=$port ;;
+            health) health_pid=$pid; health_port=$port ;;
+        esac
     }
 
-    # $1 = ta|col, $2 = path. Pure read (safe in $(...)); non-zero when unreachable.
+    # $1 = ta|col|health, $2 = path. Pure read (safe in $(...)); non-zero when unreachable.
     scraper_get() {
         local who="$1" path="$2" port proxy
-        if [ "$who" = ta ]; then port=$ta_port; proxy=$ta_proxy; else port=$col_port; proxy=$col_proxy; fi
+        case "$who" in
+            ta) port=$ta_port; proxy=$ta_proxy ;;
+            col) port=$col_port; proxy=$col_proxy ;;
+            health) port=$health_port; proxy=$health_proxy ;;
+        esac
         if [ -n "$port" ]; then
             curl -fsS --max-time 10 "http://127.0.0.1:$port$path" 2>/dev/null
         else
@@ -2595,6 +2605,7 @@ verify_metrics_scraper() {
         missing=""
         scraper_access ta
         scraper_access col
+        scraper_access health
         configs=$(scraper_get ta /scrape_configs || true)
         # Scope to this release's ServiceMonitors (TA job names: serviceMonitor/<ns>/<name>/<n>);
         # a customer's own KSM/node-exporter ServiceMonitor must not satisfy the check.
@@ -2621,6 +2632,23 @@ verify_metrics_scraper() {
             missing="$missing collector-export(sent must grow, failed must not)"
         fi
         prev_sent=$sent; prev_failed=$failed
+        # Exports alone are not proof: a blocked scrape still exports a synthetic up=0.
+        # Require a successful scrape (up == 1) of each core target this release ships.
+        missing="$missing$(scraper_get health /metrics 2>/dev/null | NS="$NAMESPACE" awk '
+            function label(name,   m) {
+                if (match($0, "[{,]" name "=\"[^\"]*\"")) { m = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", m); sub(/"$/, "", m); return m }
+                return ""
+            }
+            !/^up\{/ || $NF != 1 { next }
+            { job = label("job"); ns = label("namespace"); path = label("metrics_path") }
+            job == "kube-state-metrics" && ns == ENVIRON["NS"] { ok["kube-state-metrics"] = 1 }
+            job == "node-exporter" && ns == ENVIRON["NS"] { ok["node-exporter"] = 1 }
+            job == "kubelet" && path == "/metrics" { ok["kubelet"] = 1 }
+            job == "kubelet" && path == "/metrics/cadvisor" { ok["cadvisor"] = 1 }
+            END {
+                split("kube-state-metrics node-exporter kubelet cadvisor", want, " ")
+                for (i = 1; i <= 4; i++) if (!(want[i] in ok)) printf " scrape-up:%s", want[i]
+            }')"
 
         if [ -z "$missing" ]; then
             log_info "✓ OTel metrics scraper is healthy"
