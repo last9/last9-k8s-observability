@@ -41,6 +41,12 @@ def render(chart, version, values, release="rel"):
     return [d for d in yaml.safe_load_all(out) if d]
 
 
+def helm_schema_flag():
+    # Same detection as the installer: the flag exists only from Helm 3.16; CI pins 3.14.
+    help_text = subprocess.run(["helm", "template", "--help"], capture_output=True, text=True).stdout
+    return ["--skip-schema-validation"] if "--skip-schema-validation" in help_text else []
+
+
 def kind(docs, k):
     return [d for d in docs if d["kind"] == k]
 
@@ -96,7 +102,7 @@ class TargetAllocatorValues(unittest.TestCase):
             # --repo, not a repo alias: CI only adds the open-telemetry repo.
             out = subprocess.run(
                 ["helm", "template", "last9-k8s-monitoring", "kube-prometheus-stack", "--repo", KPS_REPO,
-                 "--version", "75.15.1", "--namespace", "last9", "-f", f.name, "--skip-schema-validation"],
+                 "--version", "75.15.1", "--namespace", "last9", "-f", f.name, *helm_schema_flag()],
                 check=True, capture_output=True, text=True).stdout
         finally:
             os.unlink(f.name)
