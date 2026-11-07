@@ -13,6 +13,9 @@
 #   SIMULATE_KUBELET_ZERO_TARGETS  "1" -> TA kubelet job exists but has no targets
 #   SIMULATE_LOCAL_EXPORTER_ONLY  "1" -> only the local prometheus/scrape_health exporter sends; remote write stays at 0
 #   SIMULATE_COLLECTOR_PODS  space-separated collector pod names (default last9-otel-metrics-0)
+#   SIMULATE_POD_IDS  per-poll collector identities "pod=uid/restarts ...;..." (';' separates polls, last repeats)
+#   SIMULATE_TELEMETRY  per-poll remote-write counters "pod=sent,failed ...;..."; "pod=x" -> its :8888 is unreadable
+#   (polls are counted by collector pod listings: verify lists pods once per poll)
 #   SIMULATE_KSM_ON_POD  pod name that alone scrapes kube-state-metrics (TA assigned it there)
 #   SIMULATE_SCRAPES_FAILING  "1" -> collector's local up series are all 0 (e.g. NetworkPolicy blocks scrapes)
 #   SIMULATE_KUBELET_SVC / SIMULATE_KUBELET_SVC_MANAGED_BY  orphaned operator kubelet Service in kube-system
@@ -31,6 +34,23 @@ if [ "${args[0]}" = "--context" ]; then
     args=("${args[@]:2}")
 fi
 cmd="${args[*]}"
+
+pod_polls="${KUBECTL_CALLS_LOG:-/tmp/kubectl-stub}.pod_polls"
+# $1 = "pod=value ...;pod=value ..." (one group per poll, last repeats), $2 = pod. Prints its value this poll.
+poll_value() {
+    local groups n group kv
+    [ -n "$1" ] || return 0
+    IFS=';' read -r -a groups <<< "$1"
+    n=$(cat "$pod_polls" 2>/dev/null || echo 1)
+    [ "$n" -le "${#groups[@]}" ] || n=${#groups[@]}
+    group=${groups[$((n - 1))]}
+    for kv in $group; do
+        [ "${kv%%=*}" = "$2" ] && { echo "${kv#*=}"; return 0; }
+    done
+}
+scripted_telemetry() { [ -z "$SIMULATE_TELEMETRY" ] || poll_value "$SIMULATE_TELEMETRY" "$1"; }
+# Pod name of a `port-forward -n <ns> pod/<name> :<port>` call.
+pf_pod() { local p=${cmd#*pod/}; echo "${p%% *}"; }
 
 if [ "$SIMULATE_PROXY_BLOCKED" = "1" ] && [[ "$cmd" == "get --raw "* ]]; then
     echo "Error: proxy blocked" >&2
@@ -69,6 +89,10 @@ case "$cmd" in
         exit 0
         ;;
     "port-forward "*)
+        if [[ "$cmd" == *:8888* ]] && [ "$(scripted_telemetry "$(pf_pod)")" = x ]; then
+            echo "error: unable to forward port" >&2
+            exit 1
+        fi
         # Fake forward: svc/* -> 11111, pod/* -> 22222; stays alive until the script kills it
         case "$cmd" in
             *svc/*) echo "Forwarding from 127.0.0.1:11111 -> 80";;
@@ -102,7 +126,17 @@ case "$cmd" in
         exit 0
         ;;
     "get pods -n "*" -l app.kubernetes.io/instance=last9-otel-metrics -o jsonpath="*)
-        echo "${SIMULATE_COLLECTOR_PODS:-last9-otel-metrics-0}"
+        n=$(( $(cat "$pod_polls" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$pod_polls"
+        if [[ "$cmd" != *uid* ]]; then
+            echo "${SIMULATE_COLLECTOR_PODS:-last9-otel-metrics-0}"
+            exit 0
+        fi
+        # One line per pod: <name>/<uid>/<restartCounts>
+        for p in ${SIMULATE_COLLECTOR_PODS:-last9-otel-metrics-0}; do
+            id=$(poll_value "$SIMULATE_POD_IDS" "$p")
+            echo "$p/${id:-uid-$p/0}"
+        done
         exit 0
         ;;
     "get --raw "*":9465/proxy/metrics")
@@ -124,7 +158,17 @@ case "$cmd" in
         exit 0
         ;;
     "get --raw "*"/proxy/metrics")
-        if [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ]; then
+        if [ -n "$SIMULATE_TELEMETRY" ]; then
+            pod=${cmd#*/pods/}; pod=${pod%%:*}
+            t=$(scripted_telemetry "$pod")
+            if [ "$t" = x ]; then
+                echo "Error from server (ServiceUnavailable): 503" >&2
+                exit 1
+            fi
+            echo '# TYPE otelcol_exporter_sent_metric_points_total counter'
+            echo "otelcol_exporter_sent_metric_points_total{exporter=\"prometheusremotewrite/last9\"} ${t%,*}"
+            echo "otelcol_exporter_send_failed_metric_points_total{exporter=\"prometheusremotewrite/last9\"} ${t#*,}"
+        elif [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ]; then
             echo '# TYPE otelcol_exporter_sent_metric_points_total counter'
             poll_file="${KUBECTL_CALLS_LOG:-/tmp/kubectl-stub}.metrics_polls"
             n=0

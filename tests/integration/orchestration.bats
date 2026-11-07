@@ -482,6 +482,59 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
 }
 
+two_collectors() { export SIMULATE_COLLECTOR_PODS="last9-otel-metrics-0 last9-otel-metrics-1"; }
+
+@test "migration with constant counters after telemetry recovery leaves prometheus running" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    two_collectors
+    export SIMULATE_TELEMETRY="last9-otel-metrics-0=1000,0 last9-otel-metrics-1=x;last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1000,0"
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collector-export"* ]]
+    ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+}
+
+@test "migration with constant counters after a pod replacement leaves prometheus running" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    two_collectors
+    export SIMULATE_POD_IDS="last9-otel-metrics-1=uid-a/0;last9-otel-metrics-1=uid-b/0"
+    export SIMULATE_TELEMETRY="last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1000,0;last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1500,0"
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collector-export"* ]]
+    ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+}
+
+@test "migration with constant counters after a counter reset leaves prometheus running" {
+    export SIMULATE_EXISTING_MONITORING_RELEASE=1 SIMULATE_BUNDLED_PROMETHEUS=1
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    two_collectors
+    export SIMULATE_TELEMETRY="last9-otel-metrics-0=5000,40 last9-otel-metrics-1=1000,0;last9-otel-metrics-0=4000,0 last9-otel-metrics-1=2100,0"
+    run_monitoring_only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collector-export"* ]]
+    ! grep -q "upgrade --install last9-k8s-monitoring" "$HELM_CALLS_LOG"
+}
+
+@test "verify_metrics_scraper passes once every replica is readable and writes grow" {
+    export VERIFY_SCRAPER_TIMEOUT=3 VERIFY_SCRAPER_INTERVAL=1
+    two_collectors
+    export SIMULATE_TELEMETRY="last9-otel-metrics-0=1000,0 last9-otel-metrics-1=x;last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1000,0;last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1200,0"
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -eq 0 ]
+}
+
+@test "verify_metrics_scraper fails when one replica's failures grow while another's writes grow" {
+    export VERIFY_SCRAPER_TIMEOUT=2 VERIFY_SCRAPER_INTERVAL=1
+    two_collectors
+    export SIMULATE_TELEMETRY="last9-otel-metrics-0=1000,0 last9-otel-metrics-1=1000,10;last9-otel-metrics-0=1500,0 last9-otel-metrics-1=1000,20"
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collector-export"* ]]
+}
+
 @test "failing helm list aborts without touching anything" {
     export SIMULATE_HELM_LIST_FAILURE=1
     run_monitoring_only
