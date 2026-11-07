@@ -2369,9 +2369,12 @@ setup_last9_monitoring() {
     # Run helm list on its own and check its exit status: a helm/API failure must never be
     # read as "no release" (that would take the fresh path and flip Prometheus off before verify).
     local migrating=false release_list
-    if ! release_list=$(helm list -n "$NAMESPACE" --filter "^last9-k8s-monitoring$" -q 2>/dev/null); then
-        log_error "Could not list Helm releases in namespace $NAMESPACE (helm/API error). Nothing was changed; fix cluster access and re-run."
+    local list_err
+    list_err=$(mktemp)
+    if ! release_list=$(helm list -n "$NAMESPACE" --filter "^last9-k8s-monitoring$" -q 2>"$list_err"); then
+        log_error "Could not list Helm releases in namespace $NAMESPACE: $(cat "$list_err"). No Helm releases were changed; fix cluster access and re-run."
     fi
+    rm -f "$list_err"
     if printf '%s\n' "$release_list" | grep -qx last9-k8s-monitoring; then
         migrating=true
     fi

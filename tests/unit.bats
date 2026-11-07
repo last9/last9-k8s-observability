@@ -743,7 +743,6 @@ YAML
 
     run bash -c "
         cd '$tmpdir'
-        $(declare -f load_deployment_env_helpers 2>/dev/null || true)
         helm() { :; }; kubectl() { :; }; git() { :; }
         RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
         $(awk '/^escape_for_sed\(\)/,/^}/' "$SCRIPT")

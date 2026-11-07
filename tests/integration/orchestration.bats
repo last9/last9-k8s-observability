@@ -415,7 +415,8 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     run_monitoring_only
     [ "$status" -ne 0 ]
     ! grep -q "upgrade --install" "$HELM_CALLS_LOG"
-    [[ "$output" == *"Nothing was changed"* ]]
+    [[ "$output" == *"No Helm releases were changed"* ]]
+    [[ "$output" == *"simulated helm list failure"* ]]
 }
 
 @test "migration deletes our orphaned operator kubelet Service" {
