@@ -36,6 +36,12 @@ case "$cmd" in
         exit 0
         ;;
     "upgrade --install "*)
+        # Snapshot each -f values file (per release) so tests can inspect the rendered input.
+        if [ -n "$HELM_CALLS_LOG" ]; then
+            for ((i = 0; i < ${#args[@]}; i++)); do
+                [ "${args[i]}" = "-f" ] && cp "${args[i+1]}" "${HELM_CALLS_LOG}.values.${args[2]}" 2>/dev/null
+            done
+        fi
         if [ "$SIMULATE_HELM_FAILURE" = "1" ]; then
             echo "Error: UPGRADE FAILED: simulated helm failure" >&2
             exit 1

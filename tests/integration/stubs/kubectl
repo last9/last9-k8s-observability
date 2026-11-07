@@ -7,6 +7,7 @@
 # Env flags:
 #   KUBECTL_CALLS_LOG       file to append each call to (full arg string)
 #   SIMULATE_EXISTING_CRDS  "1" → Prometheus CRDs already present on cluster
+#   SIMULATE_SCRAPER_HEALTHY / SIMULATE_SCRAPER_SEND_FAILED  "1" → healthy scraper endpoints for verify_metrics_scraper
 #   MOCK_CONTEXT            value returned by `config current-context`
 
 # Record the full call (including any --context flag the wrapper injected)
@@ -43,6 +44,20 @@ case "$cmd" in
         ;;
     "cluster-info"*)
         echo "Kubernetes control plane is running at https://stub:6443"
+        exit 0
+        ;;
+    "get --raw "*"/scrape_configs")
+        [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ] && echo '{"kube-state-metrics":{},"node-exporter":{},"kubelet":{}}'
+        exit 0
+        ;;
+    "get --raw "*"/proxy/metrics")
+        if [ "$SIMULATE_SCRAPER_HEALTHY" = "1" ]; then
+            echo '# TYPE otelcol_exporter_sent_metric_points_total counter'
+            echo 'otelcol_exporter_sent_metric_points_total{exporter="prometheusremotewrite/last9"} 1234'
+            if [ "$SIMULATE_SCRAPER_SEND_FAILED" = "1" ]; then
+                echo 'otelcol_exporter_send_failed_metric_points_total{exporter="prometheusremotewrite/last9"} 5'
+            fi
+        fi
         exit 0
         ;;
     "get "*)

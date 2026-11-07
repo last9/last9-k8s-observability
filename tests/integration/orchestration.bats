@@ -224,3 +224,92 @@ YAML
   grep -q "delete instrumentation l9-instrumentation" "$KUBECTL_CALLS_LOG"
   ! grep -q "delete instrumentations --all" "$KUBECTL_CALLS_LOG"
 }
+
+# ---------------------------------------------------------------------------
+# OTel metrics scraper (target allocator + collector)
+# ---------------------------------------------------------------------------
+
+run_scraper() {
+    run bash "$SCRIPT" function=install_metrics_scraper \
+        token=tok endpoint=https://example.com \
+        monitoring-endpoint="https://mock.last9.io/write" \
+        cluster=test-cluster \
+        "$@"
+}
+
+@test "install_metrics_scraper installs target allocator before collector" {
+    run_scraper
+    [ "$status" -eq 0 ]
+    ta=$(grep -n "upgrade --install last9-target-allocator open-telemetry/opentelemetry-target-allocator --version 0.156.0 -n last9" "$HELM_CALLS_LOG" | cut -d: -f1)
+    col=$(grep -n "upgrade --install last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n last9" "$HELM_CALLS_LOG" | cut -d: -f1)
+    [ -n "$ta" ] && [ -n "$col" ] && [ "$ta" -lt "$col" ]
+}
+
+@test "install_metrics_scraper fills placeholders" {
+    run_scraper
+    [ "$status" -eq 0 ]
+    v="${HELM_CALLS_LOG}.values.last9-otel-metrics"
+    grep -q 'endpoint: "https://mock.last9.io/write"' "$v"
+    grep -q 'cluster: "test-cluster"' "$v"
+    ! grep -q '{{' "$v"
+}
+
+@test "install_metrics_scraper fails when helm fails" {
+    export SIMULATE_HELM_FAILURE=1
+    run_scraper
+    [ "$status" -ne 0 ]
+}
+
+@test "app-metrics-keep survives special characters" {
+    run_scraper 'app-metrics-keep=foo_.*|bar\.baz/x&y'
+    [ "$status" -eq 0 ]
+    # backslash is doubled: OTTL string literals reject a bare \. (verified against collector 0.156.0)
+    grep -qF '|foo_.*|bar\\.baz/x&y)$' "${HELM_CALLS_LOG}.values.last9-otel-metrics"
+}
+
+@test "app-metrics-keep escapes double quotes and single quotes" {
+    run_scraper "app-metrics-keep=a\"b'c"
+    [ "$status" -eq 0 ]
+    grep -qF "|a\\\"b''c)\$" "${HELM_CALLS_LOG}.values.last9-otel-metrics"
+}
+
+@test "tolerations-file applies to scraper releases" {
+    run_scraper tolerations-file="$REPO_ROOT/examples/tolerations-all-nodes.yaml"
+    [ "$status" -eq 0 ]
+    grep "upgrade --install last9-target-allocator" "$HELM_CALLS_LOG" | grep -q 'tolerations\[0\].key=node-role.kubernetes.io/control-plane'
+    grep "upgrade --install last9-otel-metrics" "$HELM_CALLS_LOG" | grep -q 'tolerations\[0\].key=node-role.kubernetes.io/control-plane'
+}
+
+@test "no tolerations-file means no toleration flags on scraper releases" {
+    run_scraper
+    [ "$status" -eq 0 ]
+    ! grep -q 'tolerations' "$HELM_CALLS_LOG"
+}
+
+@test "uninstall-all removes scraper releases" {
+    run bash -c "printf 'yyyyyyyy' | bash '$SCRIPT' uninstall-all"
+    grep -q "uninstall last9-otel-metrics" "$HELM_CALLS_LOG"
+    grep -q "uninstall last9-target-allocator" "$HELM_CALLS_LOG"
+}
+
+@test "verify_metrics_scraper succeeds when targets and export are healthy" {
+    export SIMULATE_SCRAPER_HEALTHY=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -eq 0 ]
+    grep -q "services/last9-target-allocator-ta:80/proxy/scrape_configs" "$KUBECTL_CALLS_LOG"
+    grep -q "pods/last9-otel-metrics-0:8888/proxy/metrics" "$KUBECTL_CALLS_LOG"
+}
+
+@test "verify_metrics_scraper warns and fails on timeout" {
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[WARN]"* ]]
+}
+
+@test "verify_metrics_scraper fails when export is failing" {
+    export SIMULATE_SCRAPER_HEALTHY=1 SIMULATE_SCRAPER_SEND_FAILED=1
+    export VERIFY_SCRAPER_TIMEOUT=1 VERIFY_SCRAPER_INTERVAL=1
+    run bash "$SCRIPT" function=verify_metrics_scraper
+    [ "$status" -ne 0 ]
+}

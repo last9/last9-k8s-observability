@@ -33,6 +33,7 @@ NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
 COLLECTOR_VERSION="0.165.0"
 MONITORING_VERSION="75.15.1"
+TA_VERSION="0.156.0"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
 DEFAULT_REPO="https://github.com/last9/l9-otel-operator.git"
@@ -42,6 +43,7 @@ ORIGINAL_DIR="$(pwd)"
 AUTH_TOKEN=""
 OTEL_ENDPOINT=""
 MONITORING_ENDPOINT=""
+APP_METRICS_KEEP=""
 REPO_URL="$DEFAULT_REPO"
 UNINSTALL_MODE=false
 FUNCTION_TO_EXECUTE=""
@@ -1066,6 +1068,9 @@ parse_arguments() {
             monitoring-endpoint=*)
                 MONITORING_ENDPOINT="${arg#*=}"
                 ;;
+            app-metrics-keep=*)
+                APP_METRICS_KEEP="${arg#*=}"
+                ;;
             repo=*)
                 REPO_URL="${arg#*=}"
                 ;;
@@ -1188,6 +1193,9 @@ show_help() {
     echo "  cluster=CLUSTER_NAME     Set cluster.name attribute for telemetry data"
     echo "                           If not provided, automatically detected from kubectl current-context"
     echo "                           Example: cluster=prod-us-east-1"
+    echo ""
+    echo "  app-metrics-keep=REGEX   Extra metric-name regex kept (in addition to the default allowlist)"
+    echo "                           by the OTel metrics scraper. Example: app-metrics-keep='myapp_.*|http_requests_total'"
     echo ""
     echo "  context=CONTEXT_NAME     Use a specific kubectl context for all operations"
     echo "                           Useful on shared machines with multiple clusters"
@@ -2664,6 +2672,127 @@ setup_last9_monitoring() {
     echo "  kubectl get prometheus -n last9"
 }
 
+# Replace every literal occurrence of $2 with $3 in file $1 (no regex/& interpretation).
+replace_literal_in_file() {
+    local file="$1"
+    P="$2" V="$3" awk '{
+        out = ""; line = $0
+        while ((i = index(line, ENVIRON["P"])) > 0) {
+            out = out substr(line, 1, i - 1) ENVIRON["V"]
+            line = substr(line, i + length(ENVIRON["P"]))
+        }
+        print out line
+    }' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+# Install the OTel metrics scraper: standalone Target Allocator, then the StatefulSet collector.
+# $1 = cluster name. Uses MONITORING_ENDPOINT and APP_METRICS_KEEP. Returns non-zero on failure.
+install_metrics_scraper() {
+    local cluster_name="$1"
+    local ta_values="last9-target-allocator-values.yaml"
+    local col_src="last9-otel-metrics-values.yaml"
+    local col_values="last9-otel-metrics-values.rendered.yaml"
+
+    log_info "Installing OTel metrics scraper (Target Allocator + collector)..."
+    if [ ! -f "$ta_values" ] || [ ! -f "$col_src" ]; then
+        log_warn "$ta_values or $col_src not found in current directory"
+        return 1
+    fi
+
+    # Working copy: never modify the committed values file.
+    # The keep regex lands inside an OTTL double-quoted string within a YAML single-quoted
+    # string: OTTL needs \ and " escaped, YAML needs ' doubled.
+    local keep_alt=""
+    if [ -n "$APP_METRICS_KEEP" ]; then
+        keep_alt="|$(printf '%s' "$APP_METRICS_KEEP" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/'/''/g")"
+    fi
+    cp "$col_src" "$col_values"
+    replace_literal_in_file "$col_values" "{{LAST9_METRICS_ENDPOINT}}" "$MONITORING_ENDPOINT"
+    replace_literal_in_file "$col_values" "{{CLUSTER_NAME}}" "$cluster_name"
+    replace_literal_in_file "$col_values" "{{APP_METRICS_KEEP_ALT}}" "$keep_alt"
+
+    # Tolerations/nodeSelector: both charts take them at the values root.
+    local -a scheduling_args=()
+    if [ -n "$TOLERATIONS_FILE" ] && [ -z "$TOLERATIONS_FILE_PATH" ]; then
+        load_tolerations_from_file "$TOLERATIONS_FILE"
+    fi
+    if [ -n "$TOLERATIONS_FILE_PATH" ]; then
+        local arg
+        while IFS= read -r arg; do
+            [ -n "$arg" ] && scheduling_args+=("$arg")
+        done < <({ convert_tolerations_to_helm_set "$TOLERATIONS_FILE_PATH" ""
+                   convert_node_selector_to_helm_set "$TOLERATIONS_FILE_PATH" ""; } | xargs -n1)
+    fi
+
+    if ! helm_upgrade_install_with_retry last9-target-allocator open-telemetry/opentelemetry-target-allocator \
+        --version "$TA_VERSION" \
+        -n "$NAMESPACE" \
+        --create-namespace \
+        -f "$ta_values" \
+        "${scheduling_args[@]}" \
+        $HELM_SCHEMA_FLAG; then
+        log_warn "Helm install/upgrade failed for last9-target-allocator"
+        return 1
+    fi
+
+    if ! helm_upgrade_install_with_retry last9-otel-metrics open-telemetry/opentelemetry-collector \
+        --version "$COLLECTOR_VERSION" \
+        -n "$NAMESPACE" \
+        -f "$col_values" \
+        "${scheduling_args[@]}" \
+        $HELM_SCHEMA_FLAG; then
+        log_warn "Helm install/upgrade failed for last9-otel-metrics"
+        return 1
+    fi
+
+    log_info "✓ OTel metrics scraper installed"
+}
+
+# Wait until the Target Allocator serves the core scrape jobs and the collector exports samples.
+# Returns 0 when healthy, 1 (after warning what is missing) on timeout.
+verify_metrics_scraper() {
+    local timeout="${VERIFY_SCRAPER_TIMEOUT:-180}" interval="${VERIFY_SCRAPER_INTERVAL:-10}"
+    local waited=0 missing job configs metrics
+
+    log_info "Verifying OTel metrics scraper (up to ${timeout}s)..."
+    while true; do
+        missing=""
+        configs=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/services/last9-target-allocator-ta:80/proxy/scrape_configs" 2>/dev/null || true)
+        for job in kube-state-metrics node-exporter kubelet; do
+            printf '%s' "$configs" | grep -q "$job" || missing="$missing target-allocator-job:$job"
+        done
+        metrics=$(kubectl get --raw "/api/v1/namespaces/$NAMESPACE/pods/last9-otel-metrics-0:8888/proxy/metrics" 2>/dev/null || true)
+        # Sum series by name prefix; collector 0.156 may or may not append _total.
+        printf '%s\n' "$metrics" | awk '
+            /^#/ { next }
+            { n = $1; sub(/\{.*/, "", n) }
+            n ~ /^otelcol_exporter_sent_metric_points(_total)?$/ { sent += $NF }
+            n ~ /^otelcol_exporter_send_failed_metric_points(_total)?$/ { failed += $NF }
+            END { exit !(sent > 0 && failed == 0) }' \
+            || missing="$missing collector-export(sent>0,failed=0)"
+
+        if [ -z "$missing" ]; then
+            log_info "✓ OTel metrics scraper is healthy"
+            return 0
+        fi
+        if [ "$waited" -ge "$timeout" ]; then
+            log_warn "OTel metrics scraper not healthy after ${timeout}s; missing:$missing"
+            return 1
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+}
+
+# Remove the scraper releases (collector first); tolerates releases that are not installed.
+uninstall_metrics_scraper() {
+    local rel
+    for rel in last9-otel-metrics last9-target-allocator; do
+        log_info "Uninstalling $rel..."
+        helm uninstall "$rel" -n "$NAMESPACE" || log_warn "Failed to uninstall $rel (may not be installed)"
+    done
+}
+
 # Function to update auth token in events agent values file
 update_events_agent_auth_token() {
     log_info "Updating auth token in last9-kube-events-agent-values.yaml..."
@@ -2794,6 +2923,7 @@ uninstall_last9_monitoring() {
     log_warn "This will remove the Last9 monitoring stack components"
     echo "Components to be removed:"
     echo "  - Helm chart: last9-k8s-monitoring (kube-prometheus-stack)"
+    echo "  - Helm charts: last9-otel-metrics, last9-target-allocator (OTel metrics scraper)"
     echo "  - Secret: last9-remote-write-secret"
     echo "  - Namespace 'last9' (only if empty after cleanup)"
     echo ""
@@ -2813,6 +2943,8 @@ uninstall_last9_monitoring() {
     else
         log_info "Last9 K8s monitoring stack chart not found"
     fi
+
+    uninstall_metrics_scraper
     
     # Remove the secret
     log_info "Removing Last9 remote write secret..."
@@ -3232,6 +3364,20 @@ main() {
                 setup_helm_repos
                 install_events_agent
                 ;;
+            install_metrics_scraper)
+                setup_helm_repos
+                setup_repository
+                if [ -z "$CLUSTER_NAME" ]; then
+                    CLUSTER_NAME=$(sanitize_cluster_name "$(command kubectl config current-context 2>/dev/null || echo unknown-cluster)")
+                fi
+                install_metrics_scraper "$CLUSTER_NAME" || log_error "install_metrics_scraper failed. See output above."
+                ;;
+            verify_metrics_scraper)
+                verify_metrics_scraper || log_error "OTel metrics scraper verification failed."
+                ;;
+            uninstall_metrics_scraper)
+                uninstall_metrics_scraper
+                ;;
             uninstall_last9_monitoring)
                 uninstall_last9_monitoring
                 ;;
@@ -3242,7 +3388,7 @@ main() {
                 uninstall_all
                 ;;
             *)
-                echo "Available functions: setup_helm_repos, install_operator, install_collector, create_collector_service, create_instrumentation, verify_installation, setup_last9_monitoring, install_events_agent, uninstall_last9_monitoring, uninstall_events_agent, uninstall_all"
+                echo "Available functions: install_metrics_scraper, verify_metrics_scraper, uninstall_metrics_scraper, setup_helm_repos, install_operator, install_collector, create_collector_service, create_instrumentation, verify_installation, setup_last9_monitoring, install_events_agent, uninstall_last9_monitoring, uninstall_events_agent, uninstall_all"
                 log_error "Unknown function: $FUNCTION_TO_EXECUTE"
                 ;;
         esac
