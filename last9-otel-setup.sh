@@ -3271,6 +3271,8 @@ main() {
                 verify_installation
                 ;;
             setup_last9_monitoring)
+                # Also installs the metrics scraper from the open-telemetry repo.
+                setup_helm_repos
                 setup_last9_monitoring "$@"
                 ;;
             install_events_agent)
