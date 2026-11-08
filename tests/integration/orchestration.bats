@@ -401,6 +401,17 @@ line_of() { grep -n "$1" "$HELM_CALLS_LOG" | head -1 | cut -d: -f1; }
     [ "$kps" -lt "$ta" ] && [ "$ta" -lt "$col" ]
 }
 
+@test "direct monitoring registers the scraper repository" {
+    cp "$REPO_ROOT"/*.yaml .
+    run bash "$SCRIPT" function=setup_last9_monitoring \
+        cluster=test monitoring-endpoint=https://example.invalid/write \
+        username=u password=p
+    [ "$status" -eq 0 ]
+    repo_line=$(line_of 'repo add open-telemetry ')
+    ta_line=$(line_of 'upgrade --install last9-target-allocator ')
+    [ -n "$repo_line" ] && [ -n "$ta_line" ] && [ "$repo_line" -lt "$ta_line" ]
+}
+
 @test "fresh install: verify failure warns, continues, and flags it in the summary" {
     unset SIMULATE_SCRAPER_HEALTHY
     run_monitoring_only
