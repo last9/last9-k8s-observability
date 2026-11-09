@@ -11,10 +11,13 @@ W="$(mktemp -d)"
 K() { kubectl --context "$CTX" "$@"; }
 H() { helm --kube-context "$CTX" "$@"; }
 FAIL=0
+CLUSTER_CREATED=0
 fail() { echo "GATE FAIL: $*"; FAIL=1; }
 cleanup() {
   [ -n "${PF:-}" ] && kill "$PF" 2>/dev/null
-  [ "${KEEP_CLUSTER:-0}" = 1 ] || kind delete cluster --name "$CL" >/dev/null 2>&1
+  if [ "$CLUSTER_CREATED" = 1 ] && [ "${KEEP_CLUSTER:-0}" != 1 ]; then
+    kind delete cluster --name "$CL" >/dev/null 2>&1
+  fi
 }
 trap cleanup EXIT
 
@@ -25,6 +28,8 @@ kind get clusters 2>/dev/null | grep -qx "$CL" && { echo "kind cluster $CL alrea
 
 echo "### 1. kind cluster"
 kind create cluster --name "$CL" --wait 120s || exit 2
+# Early exits must never remove a cluster this invocation did not create.
+CLUSTER_CREATED=1
 
 echo "### 2. VictoriaMetrics"
 K create ns $NS || { echo "cannot create namespace $NS"; exit 2; }
