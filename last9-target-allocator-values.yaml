@@ -28,10 +28,25 @@ targetAllocator:
     prometheus_cr:
       enabled: true
       scrapeInterval: 60s
+      # Empty = every ServiceMonitor/PodMonitor in the cluster is discovered and
+      # scraped (subject to the collector-side app-metrics-keep filter). To scrape
+      # only specific ones instead, narrow these to a label selector, e.g.:
+      #   service_monitor_selector:
+      #     matchLabels:
+      #       release: prometheus
+      #   pod_monitor_selector:
+      #     matchLabels:
+      #       release: prometheus
       service_monitor_selector: {}
       pod_monitor_selector: {}
     config:
       scrape_configs:
+        # Add more static/custom jobs here the same way kubelet and ec2-metadata do
+        # below — any raw Prometheus scrape_config (kubernetes_sd_configs, static_configs,
+        # etc.) works. Minimal example:
+        #   - job_name: my-custom-target
+        #     static_configs:
+        #       - targets: ["my-service.my-namespace.svc:9100"]
         # kubelet / cAdvisor: scraped directly (role: node) because the bundled Prometheus
         # Operator, which maintains the kubelet Service/Endpoints the kps kubelet ServiceMonitor
         # selects, is disabled. Reproduces the kube-prometheus-stack 75.15.1 kubelet ServiceMonitor
