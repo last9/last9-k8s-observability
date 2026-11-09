@@ -8,6 +8,9 @@
 #   SIMULATE_HELM_TRANSIENT_FAILURE "1" → fail once, then succeed (retry path)
 #   SIMULATE_HELM_REPO_FAILURE      "1" → `helm repo add|update` exits non-zero
 #   SIMULATE_EXISTING_COLLECTOR_RELEASE "1" → `helm list` reports an existing collector release
+#   SIMULATE_EXISTING_MONITORING_RELEASE "1" -> `helm list` reports an existing last9-k8s-monitoring release
+#   SIMULATE_HELM_LIST_FAILURE "1" -> `helm list` exits non-zero
+#   SIMULATE_EXISTING_OTEL_CRDS "1" -> `helm template` emits a CRD document
 #   MOCK_HELM_VERSION               version string for `helm version --short` (default v3.14.0)
 
 [ -n "$HELM_CALLS_LOG" ] && echo "$*" >> "$HELM_CALLS_LOG"
@@ -31,11 +34,22 @@ case "$cmd" in
         fi
         exit 0
         ;;
+    "template "*)
+        # Minimal CRD document so install_operator's render/force-apply path has something to apply
+        [ "$SIMULATE_EXISTING_OTEL_CRDS" = "1" ] && printf -- '---\napiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: instrumentations.opentelemetry.io\n'
+        exit 0
+        ;;
     "show crds "*)
         # Emit nothing — no CRD manifests to apply in stub mode
         exit 0
         ;;
     "upgrade --install "*)
+        # Snapshot each -f values file (per release) so tests can inspect the rendered input.
+        if [ -n "$HELM_CALLS_LOG" ]; then
+            for ((i = 0; i < ${#args[@]}; i++)); do
+                [ "${args[i]}" = "-f" ] && cp "${args[i+1]}" "${HELM_CALLS_LOG}.values.${args[2]}" 2>/dev/null
+            done
+        fi
         if [ "$SIMULATE_HELM_FAILURE" = "1" ]; then
             echo "Error: UPGRADE FAILED: simulated helm failure" >&2
             exit 1
@@ -57,6 +71,10 @@ case "$cmd" in
         exit 0
         ;;
     list\ *)
+        if [ "$SIMULATE_HELM_LIST_FAILURE" = "1" ]; then
+            echo "Error: simulated helm list failure" >&2
+            exit 1
+        fi
         if echo "$cmd" | grep -q 'last9-opentelemetry-collector' \
             && [ "$SIMULATE_EXISTING_COLLECTOR_RELEASE" = "1" ]; then
             if echo "$cmd" | grep -q -- '-o json'; then
@@ -64,6 +82,11 @@ case "$cmd" in
             else
                 echo "last9-opentelemetry-collector"
             fi
+            exit 0
+        fi
+        if echo "$cmd" | grep -q 'last9-k8s-monitoring' \
+            && [ "$SIMULATE_EXISTING_MONITORING_RELEASE" = "1" ]; then
+            echo "last9-k8s-monitoring"
             exit 0
         fi
         if echo "$cmd" | grep -q -- '-o json'; then

@@ -33,6 +33,8 @@ NAMESPACE="last9"
 OPERATOR_VERSION="0.92.1"
 COLLECTOR_VERSION="0.165.0"
 MONITORING_VERSION="75.15.1"
+# Relative to the cloned repository root
+LEGACY_MONITORING_VALUES="GCP-Autopilot/legacy-k8s-monitoring-values.yaml"
 
 WORK_DIR="l9-otel-setup-$(date +%s)"
 DEFAULT_REPO="https://github.com/last9/l9-otel-operator.git"
@@ -1777,7 +1779,15 @@ setup_last9_monitoring() {
         --dry-run=client -o yaml | kubectl apply -f -
     
     log_info "✓ Last9 remote write secret created"
-    
+
+    # This installer still runs Prometheus, but the cloned root k8s-monitoring-values.yaml
+    # now only configures exporters for the root installer's OTel scraper. Use the
+    # Prometheus values kept for this installer instead.
+    if [ -f "$LEGACY_MONITORING_VALUES" ]; then
+        cp "$LEGACY_MONITORING_VALUES" k8s-monitoring-values.yaml
+        log_info "Using Prometheus monitoring values from $LEGACY_MONITORING_VALUES"
+    fi
+
     # Check if k8s-monitoring-values.yaml exists
     if [ ! -f "k8s-monitoring-values.yaml" ]; then
         log_error "k8s-monitoring-values.yaml not found in current directory"
