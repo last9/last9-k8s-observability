@@ -216,7 +216,7 @@ class MetricsCollectorValues(unittest.TestCase):
         # Scoped to our infra jobs (service.name) so a customer's own ServiceMonitor/PodMonitor
         # is untouched by this filter and passes through whole.
         keep, drop = main_rw_regexes()
-        scope = 'IsMatch(resource.attributes["service.name"], "^((serviceMonitor|podMonitor)/last9/.*|kubelet.*|ec2-metadata)$") and '
+        scope = 'IsMatch(resource.attributes["service.name"], "^(kube-state-metrics|node-exporter|kubelet.*|ec2-metadata)$") and '
         conds = self.cfg["processors"]["filter/last9_keep"]["metrics"]["datapoint"]
         self.assertEqual(conds, [
             scope + 'not IsMatch(metric.name, "^(' + keep + ')$")',
@@ -322,7 +322,7 @@ class MetricsCollectorContainer(unittest.TestCase):
                                 "validate", "--config=/c/config.yaml"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def _survivors(self, alt, service_name="serviceMonitor/last9/last9-k8s-monitoring-kube-state-metrics/0"):
+    def _survivors(self, alt, service_name="kube-state-metrics"):
         vals = filled_values(alt)
         try:
             flt = collector_config(render(COL_CHART, COL_VERSION, vals, release="x"))["processors"]["filter/last9_keep"]
@@ -378,8 +378,20 @@ class MetricsCollectorContainer(unittest.TestCase):
         # A customer's own ServiceMonitor/PodMonitor (any service.name outside our known infra
         # jobs) must pass through whole: no app-metrics-keep required for their own app metrics.
         all_four = {"kube_pod_info", "node_cpu_seconds_total", "container_memory_failcnt", "my_app_requests_total"}
-        self.assertEqual(self._survivors("", service_name="serviceMonitor/quests/quests-api-servicemonitor/0"), all_four)
+        self.assertEqual(self._survivors("", service_name="quests-api"), all_four)
         self.assertEqual(self._survivors("", service_name=None), all_four)
+
+    def test_bundled_exporters_still_filter(self):
+        # service.name is the scraped sample's relabeled `job` label (prometheusreceiver
+        # getJobAndInstance -> CreateResource), NOT the Target Allocator's internal discovery-job-ID
+        # string (serviceMonitor/<ns>/<name>/<n>). KSM/node-exporter's ServiceMonitors relabel job to
+        # exactly these two names - same ones the installer's own health check expects.
+        for job in ("kube-state-metrics", "node-exporter"):
+            with self.subTest(job=job):
+                self.assertEqual(
+                    self._survivors("", service_name=job),
+                    {"kube_pod_info", "node_cpu_seconds_total"},
+                )
 
     def test_kubelet_dedup_semantics(self):
         # Real prometheus receiver scraping a host HTTP target: proves job->service.name and
