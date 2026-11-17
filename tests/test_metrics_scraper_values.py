@@ -216,7 +216,7 @@ class MetricsCollectorValues(unittest.TestCase):
         # Scoped to our infra jobs (service.name) so a customer's own ServiceMonitor/PodMonitor
         # is untouched by this filter and passes through whole.
         keep, drop = main_rw_regexes()
-        scope = 'IsMatch(resource.attributes["service.name"], "^(kube-state-metrics|node-exporter|kubelet.*|ec2-metadata)$") and '
+        scope = 'IsMatch(resource.attributes["service.name"], "^(kube-state-metrics|node-exporter|apiserver|kubelet.*|ec2-metadata)$") and '
         conds = self.cfg["processors"]["filter/last9_keep"]["metrics"]["datapoint"]
         self.assertEqual(conds, [
             scope + 'not IsMatch(metric.name, "^(' + keep + ')$")',
@@ -385,8 +385,10 @@ class MetricsCollectorContainer(unittest.TestCase):
         # service.name is the scraped sample's relabeled `job` label (prometheusreceiver
         # getJobAndInstance -> CreateResource), NOT the Target Allocator's internal discovery-job-ID
         # string (serviceMonitor/<ns>/<name>/<n>). KSM/node-exporter's ServiceMonitors relabel job to
-        # exactly these two names - same ones the installer's own health check expects.
-        for job in ("kube-state-metrics", "node-exporter"):
+        # exactly these two names - same ones the installer's own health check expects. kubeApiServer's
+        # bundled ServiceMonitor (jobLabel: component, selector component=apiserver) relabels job to
+        # "apiserver" - stays enabled in k8s-monitoring-values.yaml unlike the other control-plane exporters.
+        for job in ("kube-state-metrics", "node-exporter", "apiserver"):
             with self.subTest(job=job):
                 self.assertEqual(
                     self._survivors("", service_name=job),
