@@ -213,11 +213,14 @@ class MetricsCollectorValues(unittest.TestCase):
         self.assertFalse(r.get("config", {}).get("scrape_configs"))
 
     def test_keep_drop_match_origin_main(self):
+        # Scoped to our infra jobs (service.name) so a customer's own ServiceMonitor/PodMonitor
+        # is untouched by this filter and passes through whole.
         keep, drop = main_rw_regexes()
-        conds = self.cfg["processors"]["filter/last9_keep"]["metrics"]["metric"]
+        scope = 'IsMatch(resource.attributes["service.name"], "^((serviceMonitor|podMonitor)/last9/.*|kubelet.*|ec2-metadata)$") and '
+        conds = self.cfg["processors"]["filter/last9_keep"]["metrics"]["datapoint"]
         self.assertEqual(conds, [
-            'not IsMatch(name, "^(' + keep + ')$")',
-            'IsMatch(name, "^(' + drop + ')$")',
+            scope + 'not IsMatch(metric.name, "^(' + keep + ')$")',
+            scope + 'IsMatch(metric.name, "^(' + drop + ')$")',
         ])
         with open(os.path.join(ROOT, METRICS_VALUES)) as f:
             raw = f.read()
@@ -319,7 +322,7 @@ class MetricsCollectorContainer(unittest.TestCase):
                                 "validate", "--config=/c/config.yaml"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def _survivors(self, alt):
+    def _survivors(self, alt, service_name="serviceMonitor/last9/last9-k8s-monitoring-kube-state-metrics/0"):
         vals = filled_values(alt)
         try:
             flt = collector_config(render(COL_CHART, COL_VERSION, vals, release="x"))["processors"]["filter/last9_keep"]
@@ -327,8 +330,10 @@ class MetricsCollectorContainer(unittest.TestCase):
             os.unlink(vals)
         names = ["kube_pod_info", "node_cpu_seconds_total", "container_memory_failcnt", "my_app_requests_total"]
         gauge = lambda n: {"name": n, "gauge": {"dataPoints": [{"asInt": "1", "timeUnixNano": "1700000000000000000"}]}}
-        otlp = {"resourceMetrics": [{"scopeMetrics": [{"metrics": [gauge(n) for n in names]}]}]}
-        # ponytail: otlpjsonfile receiver instead of a prometheus scrape; the filter keys on metric name only
+        res_attrs = [{"key": "service.name", "value": {"stringValue": service_name}}] if service_name else []
+        otlp = {"resourceMetrics": [{"resource": {"attributes": res_attrs},
+                                      "scopeMetrics": [{"metrics": [gauge(n) for n in names]}]}]}
+        # ponytail: otlpjsonfile receiver instead of a prometheus scrape; the filter keys on service.name + metric name
         cfg = {
             "receivers": {"otlpjsonfile": {"include": ["/in/m.json"], "start_at": "beginning"}},
             "processors": {"filter/last9_keep": flt},
@@ -368,6 +373,13 @@ class MetricsCollectorContainer(unittest.TestCase):
         self.assertEqual(self._survivors(""), {"kube_pod_info", "node_cpu_seconds_total"})
         self.assertEqual(self._survivors("|my_app_.*"),
                          {"kube_pod_info", "node_cpu_seconds_total", "my_app_requests_total"})
+
+    def test_filter_does_not_apply_to_customer_service_monitors(self):
+        # A customer's own ServiceMonitor/PodMonitor (any service.name outside our known infra
+        # jobs) must pass through whole: no app-metrics-keep required for their own app metrics.
+        all_four = {"kube_pod_info", "node_cpu_seconds_total", "container_memory_failcnt", "my_app_requests_total"}
+        self.assertEqual(self._survivors("", service_name="serviceMonitor/quests/quests-api-servicemonitor/0"), all_four)
+        self.assertEqual(self._survivors("", service_name=None), all_four)
 
     def test_kubelet_dedup_semantics(self):
         # Real prometheus receiver scraping a host HTTP target: proves job->service.name and
