@@ -59,6 +59,14 @@ jobs:
           python-version: '3.12'
       - name: Install test dependencies
         run: pip install pytest pyyaml
+      - name: Install helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+      - name: Add open-telemetry helm repo
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm repo update open-telemetry
       - name: Run python tests
         run: pytest tests/ -v
 
@@ -82,6 +90,9 @@ jobs:
           - { mode: operator-crd-conflict,  helm: v4.1.3 }
           - { mode: context,                helm: v3.14.0 }
           - { mode: existing-operator,      helm: v3.14.0 }
+          - { mode: migrate-monitoring-only, helm: v3.14.0 }
+          - { mode: migrate-full,            helm: v3.14.0 }
+          - { mode: customer-operator,      helm: v3.14.0 }
     steps:
       - uses: actions/checkout@v4
         with:

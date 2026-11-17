@@ -1,0 +1,182 @@
+# Target Allocator for the OTel metrics scraper (replaces the bundled Prometheus).
+# Chart: open-telemetry/opentelemetry-target-allocator 0.156.0, release `last9-target-allocator`, namespace `last9`.
+# Target Allocator URL (consumed by last9-otel-metrics collector values):
+# (chart names the Service <fullname>-ta)
+#   http://last9-target-allocator-ta.last9.svc:80
+# Discovers all ServiceMonitors/PodMonitors and allocates targets to collector pods
+# labelled app.kubernetes.io/instance: last9-otel-metrics.
+fullnameOverride: last9-target-allocator
+
+# Note: ServiceMonitors/PodMonitors that reference Secrets (basicAuth, bearer token, OAuth2) are not
+# supported: the Target Allocator only serves secret values over mTLS, otherwise they are redacted.
+
+targetAllocator:
+  serviceAccount:
+    # ec2-metadata discovery (ec2_sd_configs below) now runs in THIS pod, so the IRSA role
+    # (ec2:DescribeInstances) must be attached to this ServiceAccount, not to Prometheus.
+    # The IAM policy MUST be Condition-scoped (region and/or ec2:ResourceTag/*) — DescribeInstances
+    # ignores Resource ARNs, so an unconditioned policy can enumerate the whole account.
+    # Pod Identity (recommended) needs NO annotation — leave this empty.
+    # IRSA: uncomment and paste the LITERAL role ARN below.
+    annotations: {}
+      # eks.amazonaws.com/role-arn: arn:aws:iam::<ACCOUNT_ID>:role/<ROLE_NAME>  # IRSA only
+  config:
+    allocation_strategy: consistent-hashing
+    collector_selector:
+      matchlabels:
+        app.kubernetes.io/instance: last9-otel-metrics
+    prometheus_cr:
+      enabled: true
+      scrapeInterval: 60s
+      # Empty = every ServiceMonitor/PodMonitor in the cluster is discovered and
+      # scraped (subject to the collector-side app-metrics-keep filter). To scrape
+      # only specific ones instead, narrow these to a label selector, e.g.:
+      #   service_monitor_selector:
+      #     matchLabels:
+      #       release: prometheus
+      #   pod_monitor_selector:
+      #     matchLabels:
+      #       release: prometheus
+      service_monitor_selector: {}
+      pod_monitor_selector: {}
+    config:
+      scrape_configs:
+        # Add more static/custom jobs here the same way kubelet and ec2-metadata do
+        # below — any raw Prometheus scrape_config (kubernetes_sd_configs, static_configs,
+        # etc.) works. Minimal example:
+        #   - job_name: my-custom-target
+        #     static_configs:
+        #       - targets: ["my-service.my-namespace.svc:9100"]
+        # kubelet / cAdvisor: scraped directly (role: node) because the bundled Prometheus
+        # Operator, which maintains the kubelet Service/Endpoints the kps kubelet ServiceMonitor
+        # selects, is disabled. Reproduces the kube-prometheus-stack 75.15.1 kubelet ServiceMonitor
+        # (4 endpoints, one job each; `job` is relabelled to "kubelet" so output labels are unchanged):
+        # job, namespace, service, endpoint, metrics_path, node, instance (= node InternalIP:10250).
+        - &kubelet_job
+          job_name: kubelet
+          metrics_path: /metrics
+          scheme: https
+          scrape_interval: 60s
+          honor_labels: true
+          honor_timestamps: true
+          authorization:
+            credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+          tls_config:
+            ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            insecure_skip_verify: true
+          kubernetes_sd_configs:
+            - role: node
+          relabel_configs:
+            - target_label: job
+              replacement: kubelet
+            - target_label: namespace
+              replacement: kube-system
+            - target_label: service
+              replacement: last9-k8s-monitoring-kube-kubelet
+            - target_label: endpoint
+              replacement: https-metrics
+            - source_labels: [__meta_kubernetes_node_name]
+              target_label: node
+            - source_labels: [__metrics_path__]
+              target_label: metrics_path
+            # role: node defaults instance to the node NAME; the operator's endpoints role used the address (node InternalIP:10250)
+            - source_labels: [__address__]
+              target_label: instance
+          metric_relabel_configs:
+            - action: drop
+              source_labels: [__name__, le]
+              regex: (csi_operations|storage_operation_duration)_seconds_bucket;(0.25|2.5|15|25|120|600)(\.0)?
+        - <<: *kubelet_job
+          job_name: kubelet-cadvisor
+          metrics_path: /metrics/cadvisor
+          track_timestamps_staleness: true
+          metric_relabel_configs:
+            - action: drop
+              source_labels: [__name__]
+              regex: container_cpu_(cfs_throttled_seconds_total|load_average_10s|system_seconds_total|user_seconds_total)
+            - action: drop
+              source_labels: [__name__]
+              regex: container_fs_(io_current|io_time_seconds_total|io_time_weighted_seconds_total|reads_merged_total|sector_reads_total|sector_writes_total|writes_merged_total)
+            - action: drop
+              source_labels: [__name__]
+              regex: container_memory_(mapped_file|swap)
+            - action: drop
+              source_labels: [__name__]
+              regex: container_(file_descriptors|tasks_state|threads_max)
+            - action: drop
+              source_labels: [__name__, scope]
+              regex: container_memory_failures_total;hierarchy
+            - action: drop
+              source_labels: [__name__, interface]
+              regex: container_network_.*;(cali|cilium|cni|lxc|nodelocaldns|tunl).*
+            - action: drop
+              source_labels: [__name__]
+              regex: container_spec.*
+            - action: drop
+              source_labels: [id, pod]
+              regex: .+;
+        - <<: *kubelet_job
+          job_name: kubelet-probes
+          metrics_path: /metrics/probes
+          metric_relabel_configs: []
+        - <<: *kubelet_job
+          job_name: kubelet-resource
+          metrics_path: /metrics/resource/v1alpha1
+          track_timestamps_staleness: true
+          metric_relabel_configs: []
+        - job_name: ec2-metadata
+          scrape_interval: 5m
+          scrape_timeout: 10s
+          ec2_sd_configs:
+            - region: "REPLACE_WITH_AWS_REGION"   # set your region, e.g. us-east-1. edit this file directly; it is passed to helm as-is, so no {{ }} placeholder is substituted.
+              port: 9                  # discard port: scrape fails fast (up=0); avoids node-exporter double-scrape
+              refresh_interval: 5m
+              # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
+              # Filter to running instances to cut stopped/terminated noise + connection attempts.
+              # Scope to only monitored hosts with a tag filter, e.g.:
+              #   - name: tag:last9-monitored
+              #     values: [ "true" ]
+              filters:
+                - name: instance-state-name
+                  values: [ running ]
+          # NOTE: scrape_configs here is raw Prometheus config → snake_case
+          # (relabel_configs / metric_relabel_configs / source_labels / target_label).
+          relabel_configs:
+            - source_labels: [__meta_ec2_private_ip]
+              target_label: internal_ip
+            - source_labels: [__meta_ec2_tag_Name]
+              regex: '(.{1,63}).*'
+              target_label: ec2_name
+              replacement: '${1}'      # bound Name length (cardinality + sanitization)
+            - source_labels: [__meta_ec2_instance_id]
+              target_label: instance_id
+            - source_labels: [__meta_ec2_instance_type]
+              target_label: instance_type
+            - source_labels: [__meta_ec2_availability_zone]
+              target_label: az
+            - source_labels: [__meta_ec2_region]
+              target_label: region
+            - source_labels: [__meta_ec2_architecture]
+              target_label: arch
+            # AWS tags -> host labels (the dashboard already groups/filters on these).
+            # CUSTOMISE: these assume tag keys Environment/Team/Service — adjust to your
+            # org's keys/casing (e.g. environment, env). Missing tags -> empty labels.
+            - source_labels: [__meta_ec2_tag_Environment]
+              target_label: environment
+            - source_labels: [__meta_ec2_tag_Team]
+              target_label: team
+            - source_labels: [__meta_ec2_tag_Service]
+              target_label: service
+            # ASG name: the aws:autoscaling:groupName tag (key sanitized to underscores
+            # in the meta-label). Identifies node fleets — DD's `autoscaling_group`.
+            - source_labels: [__meta_ec2_tag_aws_autoscaling_groupName]
+              target_label: asg
+            - source_labels: [__meta_ec2_instance_lifecycle]
+              target_label: lifecycle   # spot / on-demand (empty = on-demand)
+            - source_labels: [__meta_ec2_vpc_id]
+              target_label: vpc_id
+            # subnet_id meta-label can arrive comma-wrapped (",subnet-…,") — extract the id.
+            - source_labels: [__meta_ec2_subnet_id]
+              regex: ',*([^,]+),*'
+              target_label: subnet_id
+              replacement: '${1}'
