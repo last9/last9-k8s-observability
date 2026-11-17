@@ -107,13 +107,13 @@ echo "### 6. waiting ${WAIT}s"; sleep "$WAIT"
 echo "### 7. parity diff (default keep)"
 D --queries "$HERE/fixtures/parity-queries.txt" --name-regex '(?!parity_app_).*' || fail "parity diff (default)"
 
-echo "### 8. default-keep: parity_app_* absent from both"
-for p in prom otel; do
-  n=$(curl -s -G "$VM/api/v1/series" --data-urlencode "match[]={__name__=~\"parity_app_.*\",pipeline=\"$p\"}" | python3 -I -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')
-  [ "$n" = 0 ] || fail "parity_app_* present in $p without opt-in ($n series)"
-done
+echo "### 8. default-keep: parity_app_* absent from prom (still gated by app-metrics-keep), present in otel (filter/last9_keep no longer applies to non-infra jobs)"
+n_prom=$(curl -s -G "$VM/api/v1/series" --data-urlencode 'match[]={__name__=~"parity_app_.*",pipeline="prom"}' | python3 -I -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')
+[ "$n_prom" = 0 ] || fail "parity_app_* present in prom without opt-in ($n_prom series)"
+n_otel=$(curl -s -G "$VM/api/v1/series" --data-urlencode 'match[]={__name__=~"parity_app_.*",pipeline="otel"}' | python3 -I -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))')
+[ "$n_otel" -gt 0 ] || fail "parity_app_* absent in otel by default (filter/last9_keep should no longer gate non-infra jobs)"
 
-echo "### 9. app-metrics opt-in (both pipelines)"
+echo "### 9. app-metrics opt-in (both pipelines; otel already had parity_app_* from step 8 - this upgrade is a no-op for otel, kept for symmetry with prom)"
 H upgrade last9-otel-metrics open-telemetry/opentelemetry-collector --version 0.165.0 -n $NS -f "$W/otel-app.yaml" --wait --timeout 5m || fail "collector upgrade"
 H upgrade last9-k8s-monitoring prometheus-community/kube-prometheus-stack --version 75.15.1 -n $NS -f "$W/old-app.yaml" -f "$W/old-extra.yaml" --wait --timeout 8m || fail "old upgrade"
 echo "waiting ${WAIT2}s"; sleep "$WAIT2"
