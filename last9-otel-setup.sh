@@ -2486,13 +2486,17 @@ install_metrics_scraper() {
         return 1
     fi
 
-    local aws_region="$AWS_REGION" node_provider_id node_zone
+    local aws_region="$AWS_REGION" node_provider_id node_region node_zone
     if [ -z "$aws_region" ]; then
         node_provider_id=$(kubectl get nodes -o jsonpath='{.items[0].spec.providerID}' 2>/dev/null || true)
     fi
     if [ -z "$aws_region" ] && [[ "$node_provider_id" == aws://* ]]; then
-        node_zone=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
-        aws_region=$(printf '%s' "$node_zone" | sed -n 's/^\(.*-[0-9][0-9]*\)[a-z]$/\1/p')
+        node_region=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/region}' 2>/dev/null || true)
+        aws_region="$node_region"
+        if [ -z "$aws_region" ]; then
+            node_zone=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
+            aws_region=$(printf '%s' "$node_zone" | sed -n 's/^\(.*-[0-9][0-9]*\)[a-z]$/\1/p')
+        fi
     fi
     if { [ -n "$aws_region" ] || [[ "$node_provider_id" == aws://* ]]; } &&
         ! printf '%s' "$aws_region" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]+$'; then
