@@ -260,13 +260,23 @@ run_scraper() {
 }
 
 @test "install_metrics_scraper derives AWS region from the first node zone" {
+    export MOCK_NODE_REGION=
     export MOCK_NODE_ZONE=ap-south-1b
     run_scraper
     [ "$status" -eq 0 ]
     grep -q 'region: "ap-south-1"' "${HELM_CALLS_LOG}.values.last9-target-allocator"
 }
 
+@test "install_metrics_scraper uses the node region for an AWS Local Zone" {
+    export MOCK_NODE_REGION=us-west-2
+    export MOCK_NODE_ZONE=us-west-2-lax-1a
+    run_scraper
+    [ "$status" -eq 0 ]
+    grep -q 'region: "us-west-2"' "${HELM_CALLS_LOG}.values.last9-target-allocator"
+}
+
 @test "install_metrics_scraper refuses an unresolved AWS region before helm" {
+    export MOCK_NODE_REGION=
     export MOCK_NODE_ZONE=
     run_scraper
     [ "$status" -ne 0 ]
