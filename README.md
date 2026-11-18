@@ -112,7 +112,7 @@ kubectl get secrets -n last9 last9-remote-write-secret
 >
 > **Application metrics:** pass `app-metrics-keep=<regex>` to also forward application metric names matching the regex (alternated into the default allowlist). `le`/`quantile` label values are formatted without a trailing `.0` (e.g. `1` not `1.0`).
 >
-> **EC2 / IRSA:** the `ec2-metadata` job's IAM role annotation (`eks.amazonaws.com/role-arn`) now goes on the `last9-target-allocator` service account (in `last9-target-allocator-values.yaml`), not on a Prometheus service account. Pod Identity needs no annotation.
+> **EC2 / IRSA:** on AWS clusters, the installer derives the region from the first node's `topology.kubernetes.io/zone` label. Pass `aws-region=us-east-1` to override detection; installation fails before Helm when an AWS region cannot be resolved. On non-AWS clusters the installer omits the `ec2-metadata` job. Its IAM role annotation (`eks.amazonaws.com/role-arn`) goes on the `last9-target-allocator` service account (in `last9-target-allocator-values.yaml`), not on a Prometheus service account. Pod Identity needs no annotation.
 >
 > **Unsupported: secret-based scrape auth.** ServiceMonitors/PodMonitors that reference Secrets (`basicAuth`, bearer token secret, OAuth2) are not supported by the OTel scraper: the Target Allocator only serves secret values over mTLS and otherwise redacts them, so those targets fail to authenticate.
 >

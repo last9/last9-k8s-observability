@@ -155,7 +155,6 @@ class TargetAllocatorValues(unittest.TestCase):
         # chart hardcodes the "-ta" suffix on the Service name (<fullname>-ta)
         self.assertIn("last9-target-allocator-ta", [s["metadata"]["name"] for s in kind(self.docs, "Service")])
 
-
 def filled_values(alt=""):
     """Metrics values file with Task 3's placeholders substituted; returns temp path."""
     with open(os.path.join(ROOT, METRICS_VALUES)) as f:
@@ -168,6 +167,15 @@ def filled_values(alt=""):
     f.write(src)
     f.close()
     return f.name
+
+
+class GkeLegacyValues(unittest.TestCase):
+    def test_gke_legacy_values_do_not_configure_aws_discovery(self):
+        with open(os.path.join(ROOT, "GCP-Autopilot", "legacy-k8s-monitoring-values.yaml")) as values:
+            config = values.read()
+
+        self.assertNotIn("ec2_sd_configs", config)
+        self.assertNotIn("REPLACE_WITH_AWS_REGION", config)
 
 
 def collector_config(docs):
