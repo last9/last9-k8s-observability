@@ -2486,12 +2486,16 @@ install_metrics_scraper() {
         return 1
     fi
 
-    local aws_region="$AWS_REGION" node_zone
+    local aws_region="$AWS_REGION" node_provider_id node_zone
     if [ -z "$aws_region" ]; then
+        node_provider_id=$(kubectl get nodes -o jsonpath='{.items[0].spec.providerID}' 2>/dev/null || true)
+    fi
+    if [ -z "$aws_region" ] && [[ "$node_provider_id" == aws://* ]]; then
         node_zone=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
         aws_region=$(printf '%s' "$node_zone" | sed -n 's/^\(.*-[0-9][0-9]*\)[a-z]$/\1/p')
     fi
-    if ! printf '%s' "$aws_region" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]+$'; then
+    if { [ -n "$aws_region" ] || [[ "$node_provider_id" == aws://* ]]; } &&
+        ! printf '%s' "$aws_region" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]+$'; then
         log_warn "Could not determine a valid AWS region for the ec2-metadata job; pass aws-region=<region> (for example, aws-region=us-east-1)"
         return 1
     fi
@@ -2504,7 +2508,17 @@ install_metrics_scraper() {
         keep_alt="|$(printf '%s' "$APP_METRICS_KEEP" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/'/''/g")"
     fi
     cp "$ta_src" "$ta_values"
-    replace_literal_in_file "$ta_values" "REPLACE_WITH_AWS_REGION" "$aws_region"
+    if [ -n "$aws_region" ]; then
+        replace_literal_in_file "$ta_values" "REPLACE_WITH_AWS_REGION" "$aws_region"
+    else
+        # EC2 discovery requires an AWS region and credentials. Non-AWS clusters should
+        # retain the portable Kubernetes jobs without attempting AWS API calls.
+        awk '
+            skip && /^        - / { skip = 0 }
+            $0 == "        - job_name: ec2-metadata" { skip = 1; next }
+            !skip
+        ' "$ta_values" > "${ta_values}.tmp" && mv "${ta_values}.tmp" "$ta_values"
+    fi
     cp "$col_src" "$col_values"
     replace_literal_in_file "$col_values" "{{LAST9_METRICS_ENDPOINT}}" "$MONITORING_ENDPOINT"
     replace_literal_in_file "$col_values" "{{CLUSTER_NAME}}" "$cluster_name"
