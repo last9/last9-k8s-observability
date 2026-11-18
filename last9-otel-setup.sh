@@ -44,6 +44,7 @@ AUTH_TOKEN=""
 OTEL_ENDPOINT=""
 MONITORING_ENDPOINT=""
 APP_METRICS_KEEP=""
+AWS_REGION=""
 REPO_URL="$DEFAULT_REPO"
 UNINSTALL_MODE=false
 FUNCTION_TO_EXECUTE=""
@@ -1019,6 +1020,9 @@ parse_arguments() {
                 ;;
             app-metrics-keep=*)
                 APP_METRICS_KEEP="${arg#*=}"
+                ;;
+            aws-region=*)
+                AWS_REGION="${arg#*=}"
                 ;;
             repo=*)
                 REPO_URL="${arg#*=}"
@@ -2467,7 +2471,8 @@ replace_literal_in_file() {
 # $1 = cluster name. Uses MONITORING_ENDPOINT and APP_METRICS_KEEP. Returns non-zero on failure.
 install_metrics_scraper() {
     local cluster_name="$1"
-    local ta_values="last9-target-allocator-values.yaml"
+    local ta_src="last9-target-allocator-values.yaml"
+    local ta_values="last9-target-allocator-values.rendered.yaml"
     local col_src="last9-otel-metrics-values.yaml"
     local col_values="last9-otel-metrics-values.rendered.yaml"
 
@@ -2476,8 +2481,18 @@ install_metrics_scraper() {
         log_warn "Monitoring endpoint is empty; pass monitoring-endpoint=<value>"
         return 1
     fi
-    if [ ! -f "$ta_values" ] || [ ! -f "$col_src" ]; then
-        log_warn "$ta_values or $col_src not found in current directory"
+    if [ ! -f "$ta_src" ] || [ ! -f "$col_src" ]; then
+        log_warn "$ta_src or $col_src not found in current directory"
+        return 1
+    fi
+
+    local aws_region="$AWS_REGION" node_zone
+    if [ -z "$aws_region" ]; then
+        node_zone=$(kubectl get nodes -o jsonpath='{.items[0].metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
+        aws_region=$(printf '%s' "$node_zone" | sed -n 's/^\(.*-[0-9][0-9]*\)[a-z]$/\1/p')
+    fi
+    if ! printf '%s' "$aws_region" | grep -Eq '^[a-z][a-z0-9-]*-[0-9]+$'; then
+        log_warn "Could not determine a valid AWS region for the ec2-metadata job; pass aws-region=<region> (for example, aws-region=us-east-1)"
         return 1
     fi
 
@@ -2488,6 +2503,8 @@ install_metrics_scraper() {
     if [ -n "$APP_METRICS_KEEP" ]; then
         keep_alt="|$(printf '%s' "$APP_METRICS_KEEP" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/'/''/g")"
     fi
+    cp "$ta_src" "$ta_values"
+    replace_literal_in_file "$ta_values" "REPLACE_WITH_AWS_REGION" "$aws_region"
     cp "$col_src" "$col_values"
     replace_literal_in_file "$col_values" "{{LAST9_METRICS_ENDPOINT}}" "$MONITORING_ENDPOINT"
     replace_literal_in_file "$col_values" "{{CLUSTER_NAME}}" "$cluster_name"
@@ -3485,4 +3502,3 @@ trap cleanup EXIT INT TERM
 # Run main function when executed directly (not sourced for testing).
 # The || true prevents set -e from exiting when condition is false (sourced context).
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && main "$@" || true
-

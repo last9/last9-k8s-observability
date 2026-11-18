@@ -128,7 +128,7 @@ targetAllocator:
           scrape_interval: 5m
           scrape_timeout: 10s
           ec2_sd_configs:
-            - region: "REPLACE_WITH_AWS_REGION"   # set your region, e.g. us-east-1. edit this file directly; it is passed to helm as-is, so no {{ }} placeholder is substituted.
+            - region: "REPLACE_WITH_AWS_REGION"   # the installer replaces this from aws-region= or a node zone; GitOps users must set it directly.
               port: 9                  # discard port: scrape fails fast (up=0); avoids node-exporter double-scrape
               refresh_interval: 5m
               # Discovery is region-wide — DescribeInstances can't be IAM-scoped tighter.
