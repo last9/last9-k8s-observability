@@ -274,6 +274,16 @@ run_scraper() {
     ! grep -q "upgrade --install last9-target-allocator" "$HELM_CALLS_LOG"
 }
 
+@test "install_metrics_scraper skips EC2 discovery on a non-AWS cluster without a zone" {
+    export MOCK_NODE_ZONE=
+    export MOCK_NODE_PROVIDER_ID=kind://docker/kind-control-plane
+    run_scraper
+    [ "$status" -eq 0 ]
+    ta="${HELM_CALLS_LOG}.values.last9-target-allocator"
+    ! grep -q 'job_name: ec2-metadata' "$ta"
+    ! grep -q 'REPLACE_WITH_AWS_REGION' "$ta"
+}
+
 @test "install_metrics_scraper fails when helm fails" {
     export SIMULATE_HELM_FAILURE=1
     run_scraper
