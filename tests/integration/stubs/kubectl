@@ -24,6 +24,7 @@
 #   SIMULATE_PORT_FORWARD_EXITS  "1" -> `port-forward` prints its Forwarding line then exits immediately
 #   SIMULATE_EXISTING_OTEL_CRDS  "1" -> OpenTelemetry CRDs already present on cluster
 #   MOCK_CONTEXT            value returned by `config current-context`
+#   MOCK_NODE_ZONE          node topology zone (default us-east-1a; empty disables detection)
 
 # Record the full call (including any --context flag the wrapper injected)
 [ -n "$KUBECTL_CALLS_LOG" ] && echo "$*" >> "$KUBECTL_CALLS_LOG"
@@ -64,6 +65,10 @@ case "$cmd" in
         ;;
     "config current-context"*)
         echo "${MOCK_CONTEXT:-test-cluster}"
+        exit 0
+        ;;
+    "get nodes -o jsonpath={.items[0].metadata.labels.topology\\.kubernetes\\.io/zone}"*)
+        printf '%s' "${MOCK_NODE_ZONE-us-east-1a}"
         exit 0
         ;;
     "get crd alertmanagerconfigs.monitoring.coreos.com"*)

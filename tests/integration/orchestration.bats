@@ -248,12 +248,30 @@ run_scraper() {
 }
 
 @test "install_metrics_scraper fills placeholders" {
-    run_scraper
+    run_scraper aws-region=eu-west-1
     [ "$status" -eq 0 ]
     v="${HELM_CALLS_LOG}.values.last9-otel-metrics"
     grep -q 'endpoint: "https://mock.last9.io/write"' "$v"
     grep -q 'cluster: "test-cluster"' "$v"
     ! grep -q '{{' "$v"
+    ta="${HELM_CALLS_LOG}.values.last9-target-allocator"
+    grep -q 'region: "eu-west-1"' "$ta"
+    ! grep -q 'REPLACE_WITH_AWS_REGION' "$ta"
+}
+
+@test "install_metrics_scraper derives AWS region from the first node zone" {
+    export MOCK_NODE_ZONE=ap-south-1b
+    run_scraper
+    [ "$status" -eq 0 ]
+    grep -q 'region: "ap-south-1"' "${HELM_CALLS_LOG}.values.last9-target-allocator"
+}
+
+@test "install_metrics_scraper refuses an unresolved AWS region before helm" {
+    export MOCK_NODE_ZONE=
+    run_scraper
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"aws-region=<region>"* ]]
+    ! grep -q "upgrade --install last9-target-allocator" "$HELM_CALLS_LOG"
 }
 
 @test "install_metrics_scraper fails when helm fails" {
