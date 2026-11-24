@@ -4,4 +4,4 @@
 - Keep Helm-invoking tests compatible with CI's pinned Helm 3.14: use `--repo <url>` instead of aliases, and detect version-gated flags such as `--skip-schema-validation` from `--help`.
 - Split `--set` argument strings with `read -r -a`, never `xargs`, which strips `\.` escapes; test a dotted key such as `kubernetes.io/os`.
 - Run cleanup only for resources whose creation succeeded in the current run; test prerequisite refusal, pre-existing resources, creation failure, later setup failure, and explicit preservation.
-- Health gates must read every sharded replica and compare exporter counters per process identity across complete polls. Unreadable, replaced, restarted, or reset sources invalidate the baseline.
+- Health gates must read every sharded replica and compare exporter counters per process identity across complete polls. Unreadable, replaced, restarted, or reset sources invalidate the baseline. Gate destructive cutovers on per-target scrape success (`up == 1`), not export counters alone: failed scrapes still export synthetic `up=0` samples.
